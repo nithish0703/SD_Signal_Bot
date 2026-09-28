@@ -22,6 +22,14 @@ on:
       days:
         description: "account mode: last N days"
         default: "30"
+      sizing:
+        description: "account mode: risk = same $ loss every trade (like live signals), fixed = margin x leverage"
+        type: choice
+        options: [risk, fixed]
+        default: risk
+      risk:
+        description: "account mode (risk sizing): $ loss if SL is hit"
+        default: "1"
 
 permissions:
   contents: write
@@ -65,7 +73,8 @@ jobs:
           elif [ "$MODE" = "backtest" ]; then python bot.py --backtest --candles 6000
           elif [ "$MODE" = "account" ]; then python bot.py --account \
               --balance "${{ github.event.inputs.balance }}" --margin "${{ github.event.inputs.margin }}" \
-              --leverage "${{ github.event.inputs.leverage }}" --days "${{ github.event.inputs.days }}"
+              --leverage "${{ github.event.inputs.leverage }}" --days "${{ github.event.inputs.days }}" \
+              --sizing "${{ github.event.inputs.sizing }}" --risk "${{ github.event.inputs.risk }}"
           else python bot.py
           fi
 

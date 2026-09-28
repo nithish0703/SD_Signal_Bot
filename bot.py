@@ -905,9 +905,13 @@ def money(x):
     return f"{'+' if x >= 0 else '−'}${abs(x):.2f}"
 
 
-def run_account(balance, margin, leverage, days):
-    """Simulate a real account: fixed margin x leverage per trade, one position per coin,
-    a trade is only opened if enough free balance. Fees included; funding/slippage not."""
+def run_account(balance, margin, leverage, days, mode="risk", risk=1.0):
+    """Simulate a real account, one position per coin, a trade only opens if free balance >= its margin.
+    mode 'risk' : every trade loses ~`risk` $ at SL (leverage picked per trade, like the live signal).
+    mode 'fixed': every trade is margin x leverage, so the $ loss depends on the SL distance.
+    Fees included; funding/slippage not."""
+    global RISK_USD
+    RISK_USD = risk
     exits = [("Trail 3 ATR", "trail", TRAIL_ATR), ("Fixed 2R", "fixed", 2.0), ("Fixed 1R", "fixed", 1.0)]
     per_hour = {"15m": 4, "30m": 2, "1h": 1, "2h": 0.5, "4h": 0.25}.get(TIMEFRAME, 1)
     need = int(days * 24 * per_hour) + 400                       # period + warm-up
@@ -929,15 +933,20 @@ def run_account(balance, margin, leverage, days):
             for s in setups_for(C, H, side):
                 if s["score"] < MIN_SCORE or sl_pct(s) < MIN_SL_PCT or s["time"] < start_ms:
                     continue
-                liq_px = s["entry"] * (1 - liq_dist / 100) if side == "LONG" else s["entry"] * (1 + liq_dist / 100)
-                liquidates = sl_pct(s) >= liq_dist                  # SL beyond liquidation
+                if mode == "risk":
+                    z = sizing(s, side, margin)
+                    c_lev, c_pos, c_liq = z["lev"], z["pos"], z["liq_dist"]
+                else:
+                    c_lev, c_pos, c_liq = leverage, pos, liq_dist
+                liq_px = s["entry"] * (1 - c_liq / 100) if side == "LONG" else s["entry"] * (1 + c_liq / 100)
+                liquidates = sl_pct(s) >= c_liq                     # SL beyond liquidation
                 stop = liq_px if liquidates else s["sl"]
                 res = {}
                 for lbl, kind, v in exits:
                     px, idx = _exit_detail(C, s, side, kind, v, stop)
                     res[lbl] = (px, C[idx]["ct"] if idx is not None else None)
                 cands.append({"sym": sym, "side": side, "t": s["time"], "entry": s["entry"], "res": res,
-                              "liq": liquidates, "liq_px": liq_px})
+                              "liq": liquidates, "liq_px": liq_px, "pos": c_pos, "lev": c_lev})
         print(f"{sym}: {sum(1 for c in cands if c['sym'] == sym)} setups")
         time.sleep(0.1)
     cands.sort(key=lambda c: c["t"])
@@ -946,7 +955,7 @@ def run_account(balance, margin, leverage, days):
         if c["liq"] and (px <= c["liq_px"] if c["side"] == "LONG" else px >= c["liq_px"]):
             return -margin                                        # liquidation takes the whole margin
         move = (px - c["entry"]) / c["entry"] if c["side"] == "LONG" else (c["entry"] - px) / c["entry"]
-        return max(-margin, pos * move) - pos * FEE_PCT / 100
+        return max(-margin, c["pos"] * move) - c["pos"] * FEE_PCT / 100
 
     results = []
     for lbl, _, _ in exits:
@@ -988,7 +997,7 @@ def run_account(balance, margin, leverage, days):
                 pnls.append(("closed", p))
                 wins += p > 0
                 liqs += c["liq"] and p <= -margin * 0.99
-            fees += pos * FEE_PCT / 100
+            fees += c["pos"] * FEE_PCT / 100
             max_open = max(max_open, len(open_))
         settle(1e20)
         unreal = sum(back - margin for ct, back in open_.values())
@@ -1004,8 +1013,10 @@ def run_account(balance, margin, leverage, days):
                         "skip_coin": skipped_coin, "best": max(closed, default=0),
                         "worst": min(closed, default=0), "streak": worst, "liqs": liqs})
 
-    head = (f"## Account simulation: ${balance:g} start, ${margin:g} × {leverage}x per trade "
-            f"(position ${pos:g}), last {days} days\n\n"
+    levs = [c["lev"] for c in cands] or [leverage]
+    how = (f"${margin:g} margin, ~${risk:g} loss at SL, leverage {min(levs)}–{max(levs)}x (per trade)"
+           if mode == "risk" else f"${margin:g} × {leverage}x per trade (position ${pos:g})")
+    head = (f"## Account simulation: ${balance:g} start, {how}, last {days} days\n\n"
             f"{TIMEFRAME} chart, {HTF} trend, score ≥{MIN_SCORE}, SL ≥{MIN_SL_PCT}%, {coins} futures coins, "
             f"fees {FEE_PCT:.2f}% round trip. One position per coin; a trade is skipped if free balance < ${margin:g}.\n\n"
             "| Exit | Final balance | Return | Trades | Win% | Max drawdown | Loss streak | Best / worst trade | Fees paid |\n"
@@ -1024,7 +1035,7 @@ def run_account(balance, margin, leverage, days):
             f.write(report)
 
     msg = (f"💼 <b>Account backtest</b> (last {days} days)\n"
-           f"${balance:g} start, ${margin:g} × {leverage}x per trade, {coins} coins, {TIMEFRAME}\n")
+           f"${balance:g} start, {how}\n{coins} coins, {TIMEFRAME}\n")
     for r in results:
         ret = (r["final"] / balance - 1) * 100
         msg += (f"\n<b>{r['lbl']}</b>: ${balance:g} → <b>${r['final']:.2f}</b> ({ret:+.1f}%)\n"
@@ -1048,6 +1059,9 @@ def main():
     ap.add_argument("--margin", type=float, default=5)
     ap.add_argument("--leverage", type=int, default=10)
     ap.add_argument("--days", type=int, default=30)
+    ap.add_argument("--sizing", choices=["risk", "fixed"], default="risk",
+                    help="risk = same $ loss per trade (default), fixed = margin x leverage")
+    ap.add_argument("--risk", type=float, default=1.0, help="$ loss at SL in risk sizing")
     args = ap.parse_args()
     resolve_symbols()
     if args.test:
@@ -1062,7 +1076,7 @@ def main():
         run_backtest(args.candles)
         return
     if args.account:
-        run_account(args.balance, args.margin, args.leverage, args.days)
+        run_account(args.balance, args.margin, args.leverage, args.days, args.sizing, args.risk)
         return
     run_scan()
 
