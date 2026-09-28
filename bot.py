@@ -917,7 +917,7 @@ FILTER_VARS = {"ADX HTF ≥20": "FILTER_HTF_ADX=20", "ADX HTF ≥25": "FILTER_HT
                "ADX HTF ≥20 + CHOP ≤50": "FILTER_HTF_ADX=20 and FILTER_CHOP=50"}
 
 
-def market_filter_table(trades):
+def market_filter_table(trades, tests=None, exits=("Trail 3 ATR", "Fixed 2R"), title=None):
     """Compare regime filters. A filter only counts as 'consistent' if it is profitable after fees
     in the first half, the second half AND the last 30 days (with >= 10 trades in each)."""
     if not trades:
@@ -927,9 +927,9 @@ def market_filter_table(trades):
     periods = [("1st half", lambda t: t["time"] < mid), ("2nd half", lambda t: t["time"] >= mid),
                ("Last 30d", lambda t: t["time"] >= last30)]
     rows, consistent = [], []
-    for fname, f in FILTER_TESTS:
+    for fname, f in (tests or FILTER_TESTS):
         sel = [t for t in trades if t["score"] >= MIN_SCORE and f(t)]
-        for ex in ("Trail 3 ATR", "Fixed 2R"):
+        for ex in exits:
             n, w, avg, tot, _, _ = _stats(sel, ex, FEE_PCT)
             cells, ok = [], n > 0
             for _, pf in periods:
@@ -942,7 +942,7 @@ def market_filter_table(trades):
             if ok:
                 consistent.append(f"✅ {name}, {ex}: {avg:+.2f}R/trade, {n} trades"
                                   + (f" → set {FILTER_VARS[fname]}" if fname in FILTER_VARS else ""))
-    table = ("### Market filters (skip choppy / sideways markets)\n\n"
+    table = (f"### {title or 'Market filters (skip choppy / sideways markets)'}\n\n"
              f"Score ≥{MIN_SCORE}, SL ≥{MIN_SL_PCT}%, market fees. Cells = net R per trade (trades). "
              "✅ = profitable in every period.\n\n"
              "| Filter | Exit | Trades | Win% | Net/trade | 1st half | 2nd half | Last 30d | Consistent |\n"
@@ -1015,6 +1015,188 @@ def run_backtest(total):
     msg += ("\n".join(consistent[:5]) if consistent else "none – no filter was consistently profitable") + "\n"
     msg += "\nFull table: GitHub → Actions → this run's summary."
     tg(msg)
+
+
+# ============================ AMD (POWER OF 3) ============================
+# Accumulation : the Asia session range, UTC 00:00 - AMD_ACC_HOURS (must be tight)
+# Manipulation : until AMD_MANIP_END UTC, price sweeps ONE side of that range (stop hunt)
+# Distribution : a candle closes back inside (reclaim) -> enter; SL beyond the sweep extreme,
+#                targets: opposite side of the range, fixed R, trailing, or exit at end of day.
+AMD_ACC_HOURS = 8          # accumulation = first 8 hours of the UTC day
+AMD_MANIP_END = 16         # a reclaim must happen before 16:00 UTC
+AMD_MAX_RANGE_ATR = 4.0    # accumulation range must be <= 4 x ATR(1h) (tight consolidation)
+AMD_SL_BUFFER_ATR = 0.1
+
+
+def find_amd_setups(C, H, confirm="range"):
+    """AMD setups on 1h candles. confirm='range' -> reclaim of the swept range edge,
+    confirm='open' -> stricter: close back beyond the day's opening price."""
+    n = len(C)
+    o = [x["o"] for x in C]; h = [x["h"] for x in C]
+    l = [x["l"] for x in C]; cl = [x["c"] for x in C]
+    A = atr(h, l, cl, ATR_LEN)
+    E = ema(cl, EMA_LEN)
+    ADX = adx(h, l, cl)
+    CH = chop(h, l, cl)
+    hc = [x["c"] for x in H]
+    he = ema(hc, EMA_LEN)
+    hct = [x["ct"] for x in H]
+    HADX = adx([x["h"] for x in H], [x["l"] for x in H], hc)
+
+    days = {}
+    for i, x in enumerate(C):
+        days.setdefault(x["t"] // 86400000, []).append(i)
+
+    out = []
+    for day, idx in sorted(days.items()):
+        hours = {(C[i]["t"] // 3600000) % 24: i for i in idx}
+        acc = [hours[hr] for hr in range(AMD_ACC_HOURS) if hr in hours]
+        if len(acc) < AMD_ACC_HOURS:
+            continue
+        last_acc = acc[-1]
+        a = A[last_acc]
+        if not a or E[last_acc] is None:
+            continue
+        rng_hi, rng_lo = max(h[i] for i in acc), min(l[i] for i in acc)
+        rng = rng_hi - rng_lo
+        if rng <= 0 or rng > AMD_MAX_RANGE_ATR * a:
+            continue
+        day_open = o[acc[0]]
+        day_end = (day + 1) * 86400000 - 1
+        swept_lo = swept_hi = False
+        ext_lo, ext_hi = rng_lo, rng_hi
+        for hr in range(AMD_ACC_HOURS, AMD_MANIP_END):
+            i = hours.get(hr)
+            if i is None:
+                continue
+            if l[i] < rng_lo:
+                swept_lo, ext_lo = True, min(ext_lo, l[i])
+            if h[i] > rng_hi:
+                swept_hi, ext_hi = True, max(ext_hi, h[i])
+            if swept_lo and swept_hi:
+                break                                   # both sides taken: no clean manipulation
+            side = None
+            if swept_lo and cl[i] > o[i] and cl[i] > (rng_lo if confirm == "range" else max(rng_lo, day_open)):
+                side, entry, sl, target = "LONG", cl[i], ext_lo - AMD_SL_BUFFER_ATR * a, rng_hi
+            elif swept_hi and cl[i] < o[i] and cl[i] < (rng_hi if confirm == "range" else min(rng_hi, day_open)):
+                side, entry, sl, target = "SHORT", cl[i], ext_hi + AMD_SL_BUFFER_ATR * a, rng_lo
+            if not side:
+                continue
+            risk = abs(entry - sl)
+            if risk <= 0 or (side == "LONG" and target <= entry) or (side == "SHORT" and target >= entry):
+                break
+            k = bisect.bisect_right(hct, C[i]["ct"]) - 1
+            up = k >= 0 and he[k] is not None and hc[k] > he[k]
+            slope = ((E[i] - E[i - 20]) / A[i]) if i >= 20 and E[i - 20] is not None and A[i] else 0.0
+            out.append({
+                "side": side, "e": i, "entry": entry, "sl": sl, "atr": A[i] or a, "time": C[i]["ct"],
+                "target": target, "day_end": day_end, "score": 6,
+                "range_atr": rng / a, "trend": up if side == "LONG" else (k >= 0 and he[k] is not None and hc[k] < he[k]),
+                "adx": ADX[i] or 0.0, "chop": CH[i] if CH[i] is not None else 100.0,
+                "hadx": HADX[k] if k >= 0 and HADX[k] is not None else 0.0,
+                "slope": slope if side == "LONG" else -slope,
+            })
+            break                                       # one trade per coin per day
+    return out
+
+
+def _simulate_eod(C, s, side, r_target):
+    """Exit at SL, at r_target (if given), or at the close of the day's last candle."""
+    risk = abs(s["entry"] - s["sl"])
+    tp = None if r_target is None else (s["entry"] + r_target * risk if side == "LONG" else s["entry"] - r_target * risk)
+    for x in C[s["e"] + 1:]:
+        if (x["l"] <= s["sl"]) if side == "LONG" else (x["h"] >= s["sl"]):
+            return -1.0
+        if tp is not None and ((x["h"] >= tp) if side == "LONG" else (x["l"] <= tp)):
+            return r_target
+        if x["ct"] >= s["day_end"]:
+            return ((x["c"] - s["entry"]) if side == "LONG" else (s["entry"] - x["c"])) / risk
+    return None
+
+
+AMD_EXITS = [
+    ("Range target", lambda C, s: _simulate_tp(C, s, s["side"], abs(s["target"] - s["entry"]))),
+    ("Fixed 1.5R", lambda C, s: simulate(C, s, s["side"], 1.5)),
+    ("Fixed 2R", lambda C, s: simulate(C, s, s["side"], 2.0)),
+    ("Fixed 3R", lambda C, s: simulate(C, s, s["side"], 3.0)),
+    ("Trail 3 ATR", lambda C, s: _simulate_trail(C, s, s["side"], 3.0)),
+    ("2R or end of day", lambda C, s: _simulate_eod(C, s, s["side"], 2.0)),
+    ("End of day", lambda C, s: _simulate_eod(C, s, s["side"], None)),
+]
+AMD_TESTS = [
+    ("No filter", lambda t: True),
+    ("With 4h trend", lambda t: t["trend"]),
+    ("ADX HTF ≥20", lambda t: t["hadx"] >= 20),
+    ("ADX HTF ≥25", lambda t: t["hadx"] >= 25),
+    ("Trend + ADX HTF ≥25", lambda t: t["trend"] and t["hadx"] >= 25),
+    ("Tight range ≤2.5 ATR", lambda t: t["range_atr"] <= 2.5),
+    ("CHOP ≤50", lambda t: t["chop"] <= 50),
+    ("Range target ≥1R", lambda t: t["tgt_r"] >= 1.0),
+    ("Range target ≥1.5R", lambda t: t["tgt_r"] >= 1.5),
+]
+
+
+def run_amd_backtest(total):
+    """Backtest the AMD model on 1h candles for both confirmation variants."""
+    groups = {"range": [], "open": []}
+    coins = 0
+    for sym in SYMBOLS:
+        try:
+            C, src = fetch_history(sym, "1h", total)
+            H, _ = fetch_history(sym, "4h", max(total // 4 + EMA_LEN + 50, 300), source=src)
+        except Exception as e:
+            print("ERROR", e)
+            continue
+        coins += 1
+        for confirm in groups:
+            for s in find_amd_setups(C, H, confirm):
+                if sl_pct(s) < MIN_SL_PCT:
+                    continue
+                s["slp"] = sl_pct(s)
+                s["tgt_r"] = abs(s["target"] - s["entry"]) / abs(s["entry"] - s["sl"])
+                s["res"] = {lbl: f(C, s) for lbl, f in AMD_EXITS}
+                s["sym"] = sym
+                groups[confirm].append(s)
+        print(f"{sym}: range {sum(1 for t in groups['range'] if t['sym'] == sym)}, "
+              f"open {sum(1 for t in groups['open'] if t['sym'] == sym)} setups")
+        time.sleep(0.1)
+
+    head = ("| Exit | Trades | Win% | Avg win | Net/trade (market) | Net/trade (limit) | Total (market) | Max loss streak |\n"
+            "|---|---|---|---|---|---|---|---|\n")
+    names = {"range": "Entry: reclaim of the range edge", "open": "Entry: close back beyond the day open (stricter)"}
+    sections, msg_parts = [], []
+    for g, trades in groups.items():
+        rows, ranked = [], []
+        for lbl, _ in AMD_EXITS:
+            n, w, avg, tot, aw, ls = _stats(trades, lbl, FEE_PCT)
+            _, _, avg_l, _, _, _ = _stats(trades, lbl, MAKER_FEE_PCT)
+            rows.append(f"| {lbl} | {n} | {w:.0f}% | {aw:.2f}R | {avg:+.2f}R | {avg_l:+.2f}R | {tot:+.1f}R | {ls} |")
+            if n >= 20:
+                ranked.append((avg, lbl, n, w, tot))
+        ftable, consistent = market_filter_table(
+            trades, AMD_TESTS, ("Range target", "Fixed 2R", "2R or end of day"),
+            title=f"Filters – {names[g]}")
+        sections.append(f"### {names[g]}\n\n" + head + "\n".join(rows) + "\n\n" + ftable)
+        ranked.sort(reverse=True)
+        part = f"\n<b>{names[g]}</b> ({len(trades)} setups)\nTop exits:\n"
+        part += "\n".join(f"{i}. {lbl}: {avg:+.2f}R/trade, win {w:.0f}%, {n} trades ({tot:+.1f}R)"
+                           for i, (avg, lbl, n, w, tot) in enumerate(ranked[:3], 1)) or "not enough trades"
+        part += "\nConsistent filters:\n" + ("\n".join(consistent[:4]) if consistent else "none")
+        msg_parts.append(part)
+
+    report = (f"## AMD / Power of 3 backtest (~{total} 1h candles, {coins} coins)\n\n"
+              f"Accumulation = UTC 00:00–{AMD_ACC_HOURS:02d}:00 range (≤{AMD_MAX_RANGE_ATR:g} ATR). "
+              f"Manipulation = one side swept before {AMD_MANIP_END:02d}:00 UTC. Entry on the reclaim candle close, "
+              f"SL beyond the sweep. SL ≥{MIN_SL_PCT}%. Net = R per trade after fees "
+              f"(market {FEE_PCT:.2f}%, limit {MAKER_FEE_PCT:.2f}%).\n\n"
+              + "\n\n".join(sections) +
+              "\n\n_Slippage and funding are not included. Past results do not guarantee future results._\n")
+    print(report)
+    if os.getenv("GITHUB_STEP_SUMMARY"):
+        with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
+            f.write(report)
+    tg(f"🌀 <b>AMD backtest</b> (1h, {coins} coins, market fees {FEE_PCT:.2f}%)\n"
+       + "\n".join(msg_parts) + "\n\nFull tables: GitHub → Actions → run summary.")
 
 
 # ============================ ACCOUNT SIMULATION ============================
@@ -1195,6 +1377,7 @@ def main():
     ap.add_argument("--backtest", action="store_true", help="backtest on history")
     ap.add_argument("--candles", type=int, default=5000, help="candles per coin for backtest")
     ap.add_argument("--account", action="store_true", help="simulate a real account over the last N days")
+    ap.add_argument("--amd", action="store_true", help="backtest the AMD / Power of 3 model")
     ap.add_argument("--balance", type=float, default=100)
     ap.add_argument("--margin", type=float, default=5)
     ap.add_argument("--leverage", type=int, default=10)
@@ -1214,6 +1397,9 @@ def main():
         sys.exit(0 if ok else 1)
     if args.backtest:
         run_backtest(args.candles)
+        return
+    if args.amd:
+        run_amd_backtest(args.candles)
         return
     if args.account:
         run_account(args.balance, args.margin, args.leverage, args.days, args.sizing, args.risk)

@@ -84,6 +84,13 @@ Variable add panninaa adutha run-la irundhu apply aagum. Delete panninaa default
 | `RISK_USD` | `1` | SL hit aana max loss ($). Unga total account-la ~1% vechukkonga |
 | `MAX_LEVERAGE` | `20` | Idha thaandi leverage suggest pannaadhu |
 
+### AMD (Power of 3) backtest
+Actions → Run workflow → mode **amd**. 50 coins, ~250 naal 1h data-la AMD model-a test pannum:
+- **Accumulation:** UTC 00:00–08:00 (IST 5:30 AM–1:30 PM) range, tight-a irukkanum
+- **Manipulation:** 16:00 UTC (9:30 PM IST)-ku munnaadi range-oda oru side sweep aagi, thirumba ulla close
+- **Distribution:** reclaim candle-la entry, SL sweep-ku appuram
+- 2 entry types × 7 exits × 9 filters compare aagum. Idhu backtest mattum; live signals S&D strategy-la dhaan.
+
 ### Choppy / sideways market filters
 | Variable | Default | Meaning |
 |---|---|---|
