@@ -22,6 +22,7 @@ import argparse
 import bisect
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -32,7 +33,7 @@ import requests
 # Coins to scan: the TOP_N USDT coins by 24h trading volume are picked automatically
 # on every run. To use your own fixed list instead, set a repo variable
 # SYMBOLS="BTCUSDT,ETHUSDT,..." (GitHub -> Settings -> Secrets and variables -> Variables).
-TOP_N = 30
+TOP_N = 50                 # only coins that are listed on Binance USDT-M Futures
 # Used only if the automatic top-volume list cannot be fetched.
 FALLBACK_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT",
@@ -141,7 +142,12 @@ def fetch_klines(symbol, interval, limit, end_time=None, source=None):
 def fetch_history(symbol, interval, total, source=None):
     out, end = [], None
     while len(out) < total:
-        batch, source = fetch_klines(symbol, interval, 1000, end_time=end, source=source)
+        try:
+            batch, source = fetch_klines(symbol, interval, 1000, end_time=end, source=source)
+        except RuntimeError:
+            if out:          # reached the coin's listing date: use the history we have
+                break
+            raise
         seen = {x["t"] for x in out}
         batch = [x for x in batch if x["t"] not in seen]
         if not batch:
@@ -159,8 +165,9 @@ TICKER_SOURCES = [
 ]
 
 
-def top_volume_symbols(n):
-    """Top-n USDT pairs by 24h quote volume (stablecoins and leveraged tokens removed)."""
+def top_volume_ranked():
+    """All USDT pairs ranked by 24h quote volume -> (symbols, source).
+    Stablecoins, leveraged tokens and odd symbols are removed."""
     for name, url in TICKER_SOURCES:
         try:
             r = requests.get(url, timeout=20)
@@ -169,8 +176,8 @@ def top_volume_symbols(n):
             rows = []
             for x in r.json():
                 sym = x.get("symbol", "")
-                if not sym.endswith("USDT"):
-                    continue
+                if not sym.endswith("USDT") or not re.fullmatch(r"[A-Z0-9]{2,20}USDT", sym):
+                    continue                     # skips odd symbols (e.g. non-English meme tokens)
                 base = sym[:-4]
                 if (not base or base in EXCLUDE_BASES
                         or base.endswith(("UP", "DOWN", "BULL", "BEAR"))):
@@ -183,27 +190,94 @@ def top_volume_symbols(n):
                     continue
                 rows.append((qv, sym))
             rows.sort(reverse=True)
-            if len(rows) >= n:
-                return [s for _, s in rows[:n]], name
+            if rows:
+                return [s for _, s in rows], name
         except Exception as e:
             print(f"top list via {name} failed: {type(e).__name__}")
     return None, None
 
 
+def top_volume_symbols(n):
+    syms, src = top_volume_ranked()
+    return (syms[:n], src) if syms and len(syms) >= n else (None, None)
+
+
+# Futures name when it differs from spot (e.g. PEPEUSDT on spot = 1000PEPEUSDT on futures)
+FUTURES_NAME = {}
+FUT_CHECK_URL = "https://data.binance.vision/data/futures/um/daily/klines/{s}/1d/{s}-1d-{d}.zip"
+
+
+def _futures_name(sym):
+    """Futures symbol for a spot pair if it is trading on USDT-M futures, else None.
+    Checks Binance's public daily futures files (reachable from GitHub, unlike fapi)."""
+    base = sym[:-4]
+    today = datetime.now(timezone.utc).date()
+    for fut in (sym, f"1000{base}USDT"):
+        for lag in (2, 3):                        # files are published with ~1 day delay
+            d = (today - timedelta(days=lag)).isoformat()
+            try:
+                r = requests.head(FUT_CHECK_URL.format(s=fut, d=d), timeout=10)
+                if r.status_code == 200:
+                    return fut
+                if r.status_code not in (403, 404):
+                    raise RuntimeError(f"HTTP {r.status_code}")
+            except requests.RequestException as e:
+                raise RuntimeError(type(e).__name__)
+    return None
+
+
+def futures_only(candidates, n):
+    """Keep the first n candidates that are listed on Binance Futures."""
+    from concurrent.futures import ThreadPoolExecutor
+    found, errors = [], 0
+    for i in range(0, min(len(candidates), 200), 25):
+        chunk = candidates[i:i + 25]
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            results = list(ex.map(lambda c: _safe_fut(c), chunk))
+        for sym, res in zip(chunk, results):
+            if res == "error":
+                errors += 1
+            elif res:
+                found.append(sym)
+                if res != sym:
+                    FUTURES_NAME[sym] = res
+        if len(found) >= n:
+            break
+    return found[:n], errors
+
+
+def _safe_fut(sym):
+    try:
+        return _futures_name(sym)
+    except RuntimeError:
+        return "error"
+
+
 def resolve_symbols():
-    """Fill SYMBOLS: manual repo variable > live top-volume list > fallback list."""
+    """Fill SYMBOLS: manual repo variable > top-volume futures coins > fallback list."""
     global SYMBOLS
     if MANUAL_SYMBOLS:
         SYMBOLS = MANUAL_SYMBOLS
         print(f"Using {len(SYMBOLS)} coins from SYMBOLS variable")
         return
-    syms, src = top_volume_symbols(TOP_N)
-    if syms:
-        SYMBOLS = syms
-        print(f"Top {TOP_N} by 24h volume ({src}): {', '.join(SYMBOLS)}")
+    ranked, src = top_volume_ranked()
+    if ranked and src == "futures":               # futures API reachable: list is futures-only
+        SYMBOLS = ranked[:TOP_N]
+    elif ranked:
+        syms, errors = futures_only(ranked, TOP_N)
+        if len(syms) >= min(TOP_N, 10):
+            SYMBOLS = syms
+        else:                                     # futures check not reachable
+            print(f"Futures check failed ({errors} errors); using spot list without the check")
+            SYMBOLS = ranked[:TOP_N]
+            print(f"Top {len(SYMBOLS)} coins by 24h volume, NOT futures-checked: {', '.join(SYMBOLS)}")
+            return
     else:
         SYMBOLS = FALLBACK_SYMBOLS[:TOP_N]
         print(f"Top list unavailable, using fallback list of {len(SYMBOLS)} coins")
+        return
+    print(f"Top {len(SYMBOLS)} futures coins by 24h volume ({src}): {', '.join(SYMBOLS)}")
+
 
 # ============================ INDICATORS ============================
 
@@ -441,7 +515,8 @@ def signal_message(sym, side, s, source):
     checks = "\n".join(f"{'✅' if v else '❌'} {k}" for k, v in s["checks"].items())
     return (
         f"{icon} <b>{side} {sym}</b>  ({TIMEFRAME})\n"
-        f"Grade: <b>{grade}</b> ({s['score']}/6)\n\n"
+        + (f"⚠️ On Futures this is <b>{FUTURES_NAME[sym]}</b> (price ×1000)\n" if sym in FUTURES_NAME else "")
+        + f"Grade: <b>{grade}</b> ({s['score']}/6)\n\n"
         f"Entry: <code>{fp(s['entry'])}</code>\n"
         f"Stop Loss: <code>{fp(s['sl'])}</code> ({pct(s['entry'], s['sl'])})\n\n"
         f"🎯 <b>Exit plan: trailing stop {TRAIL_ATR:g}×ATR</b>\n"
@@ -769,7 +844,8 @@ def main():
     args = ap.parse_args()
     resolve_symbols()
     if args.test:
-        ok = tg(f"👋 <b>S&D bot connected!</b>\nCoins: {', '.join(SYMBOLS)}\n"
+        ok = tg(f"👋 <b>S&D bot connected!</b>\n{len(SYMBOLS)} coins: "
+                f"{', '.join(f'{x} (={FUTURES_NAME[x]})' if x in FUTURES_NAME else x for x in SYMBOLS)}\n"
                 f"Timeframe: {TIMEFRAME} (trend: {HTF}), min grade: {MIN_SCORE}/6\n"
                 f"Min SL: {MIN_SL_PCT}%, fees assumed: {FEE_PCT:.2f}%\n"
                 f"Exit plan: trailing stop {TRAIL_ATR:g}×ATR (simple option {SIMPLE_TP_R:g}R)")

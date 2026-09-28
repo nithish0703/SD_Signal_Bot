@@ -1,13 +1,13 @@
 # S&D Signal Bot (Binance Futures → Telegram)
 
-"3 Step A+ Supply & Demand" strategy-a vechu, Binance-la **24h volume adhigama irukkira top 30 coins**-a scan panni **Telegram-ku signal mattum** anuppum.
+"3 Step A+ Supply & Demand" strategy-a vechu, Binance Futures-la list aana, **24h volume adhigama irukkira top 50 coins**-a scan panni **Telegram-ku signal mattum** anuppum.
 **Auto trade illa.** Neenga chart paathu manual-a trade pannanum. GitHub Actions-la **free-a** run aagum, VPS thevai illa.
 
 ---
 
 ## Bot enna pannum
 
-Ovvoru 5 nimishathukkum, andha nerathula volume-la top 30 USDT coins-a automatic-a edukkum (stablecoins, UP/DOWN tokens skip). Apram **1h chart + 4h trend**-la check pannum (backtest-la 1h, 15m-a vida better; fees paadhippu kammi):
+Ovvoru 5 nimishathukkum, volume-la top USDT coins-la **Binance Futures-la trade aagura top 50**-a automatic-a edukkum (stablecoins, UP/DOWN tokens, Futures-la illadha coins skip). PEPE maadhiri coins Futures-la `1000PEPEUSDT`-nu irundha, signal-la adha kaatum. Apram **1h chart + 4h trend**-la check pannum (backtest-la 1h, 15m-a vida better; fees paadhippu kammi):
 
 1. **Step 1:** Base candle-ku apram 3+ big candles impulse (≥ 2 ATR) + Fair Value Gap → Demand zone (LONG) / Supply zone (SHORT)
 2. **Step 2:** Trend confirm: 15m EMA50 correct direction-la pogudhu + 1h price EMA50-ku correct side-la
@@ -71,7 +71,7 @@ Variable add panninaa adutha run-la irundhu apply aagum. Delete panninaa default
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TOP_N` | `30` | Volume-la top evvalavu coins scan pannanum |
+| `TOP_N` | `50` | Futures-la list aana top evvalavu coins scan pannanum |
 | `SYMBOLS` | (auto) | `BTCUSDT,ETHUSDT` maadhiri kudutha, indha coins mattum dhaan |
 | `MIN_SCORE` | `5` | `6` = A+ mattum (kammi signals, strong), `4` = adhiga signals |
 | `MIN_SL_PCT` | `1` | SL idha vida close-a irundha trade skip (fees profit-a saapidum) |
@@ -93,7 +93,7 @@ Actions → backtest run → summary-la 8 exit methods (fixed R, ATR TP, ATR tra
 ## Theriyanja vendiya limitations (honest-a)
 
 - **GitHub timing:** Every 5 min-nu sonnaalum GitHub sila samayam 5–20 min late-a run pannum, rare-a skip-um pannum. Adhanaala signal konjam late-a varalaam. Stale signal (SL/TP1 already hit aanadhu) bot anuppaadhu. Innum accurate timing venumnaa, free **cron-job.org** use panni GitHub API moolama workflow-a trigger pannalaam.
-- **Data source:** GitHub servers US-la irukku, anga Binance Futures API block. So bot adhe pair-oda **Binance Spot** price-a use pannum. Futures price kitta thatta same dhaan, aana konjam difference irukkalaam. Message-la endha source-nu kaatum. Top 30 list-um spot volume vechu dhaan varum. Adhanaala list-la vara coin Binance Futures-la illama irukkalaam (rare). Signal vandhaa, andha coin Futures-la irukkaa-nu check pannitu trade pannunga. PEPE, SHIB maadhiri coins Futures-la `1000PEPEUSDT` maadhiri vera name-la irukkum; price-um 1000x-a irukkum.
+- **Data source:** GitHub servers US-la irukku, anga Binance Futures API block. So bot adhe pair-oda **Binance Spot** price-a use pannum. Futures price kitta thatta same dhaan, aana konjam difference irukkalaam. Message-la endha source-nu kaatum. Futures API block-naala, coin Futures-la irukkaa-nu Binance-oda public data site (data.binance.vision) moolama check pannum. Adhuvum fail aanaa, check illama spot list use pannum (log-la theriyum). PEPE, SHIB maadhiri coins Futures-la `1000PEPEUSDT` maadhiri vera name-la, 1000x price-la irukkum; signal-la ⚠️ note varum.
 - **60-day rule:** Repo-la 60 naal activity illana GitHub schedule-a off pannidum. Bot ovvoru signal/heartbeat-kum `state.json` commit pannum, so idhu normally prachanai illa. Off aanaa Actions tab-la enable pannunga.
 - **Backtest:** Fees include aagum, aana slippage, funding include illa. Past result future-a guarantee pannaadhu.
 
