@@ -6,10 +6,22 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "scan = normal run, test = Telegram test message, backtest = check strategy on history"
+        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account"
         type: choice
-        options: [scan, test, backtest]
+        options: [scan, test, backtest, account]
         default: scan
+      balance:
+        description: "account mode: starting balance ($)"
+        default: "100"
+      margin:
+        description: "account mode: margin per trade ($)"
+        default: "5"
+      leverage:
+        description: "account mode: leverage (x)"
+        default: "10"
+      days:
+        description: "account mode: last N days"
+        default: "30"
 
 permissions:
   contents: write
@@ -43,10 +55,17 @@ jobs:
           FEE_PCT: ${{ vars.FEE_PCT }}
           TIMEFRAME: ${{ vars.TIMEFRAME }}
           HTF: ${{ vars.HTF }}
+          TRAIL_ATR: ${{ vars.TRAIL_ATR }}
+          MARGIN_USD: ${{ vars.MARGIN_USD }}
+          RISK_USD: ${{ vars.RISK_USD }}
+          MAX_LEVERAGE: ${{ vars.MAX_LEVERAGE }}
         run: |
           MODE="${{ github.event.inputs.mode }}"
           if [ "$MODE" = "test" ]; then python bot.py --test
           elif [ "$MODE" = "backtest" ]; then python bot.py --backtest --candles 6000
+          elif [ "$MODE" = "account" ]; then python bot.py --account \
+              --balance "${{ github.event.inputs.balance }}" --margin "${{ github.event.inputs.margin }}" \
+              --leverage "${{ github.event.inputs.leverage }}" --days "${{ github.event.inputs.days }}"
           else python bot.py
           fi
 

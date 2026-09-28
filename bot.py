@@ -878,11 +878,176 @@ def run_backtest(total):
     tg(msg)
 
 
+# ============================ ACCOUNT SIMULATION ============================
+
+def _exit_detail(C, s, side, kind, v, sl):
+    """Walk candles after entry. Returns (exit_price, candle_index) or (None, None) if still open.
+    kind: 'fixed' (TP at v x R) or 'trail' (v x ATR trailing stop). sl may be the liquidation price."""
+    E, S = _px(s["entry"], side), _px(sl, side)
+    risk = E - _px(s["sl"], side)
+    tp = E + v * risk if kind == "fixed" else None
+    stop, best, dist = S, E, v * s["atr"]
+    for i in range(s["e"] + 1, len(C)):
+        x = C[i]
+        hi, lo, op = (x["h"], x["l"], x["o"]) if side == "LONG" else (-x["l"], -x["h"], -x["o"])
+        if lo <= stop:
+            return _px(min(op, stop), side), i
+        if kind == "fixed":
+            if hi >= tp:
+                return _px(tp, side), i
+        else:
+            best = max(best, hi)
+            stop = max(stop, best - dist)
+    return None, None
+
+
+def money(x):
+    return f"{'+' if x >= 0 else '−'}${abs(x):.2f}"
+
+
+def run_account(balance, margin, leverage, days):
+    """Simulate a real account: fixed margin x leverage per trade, one position per coin,
+    a trade is only opened if enough free balance. Fees included; funding/slippage not."""
+    exits = [("Trail 3 ATR", "trail", TRAIL_ATR), ("Fixed 2R", "fixed", 2.0), ("Fixed 1R", "fixed", 1.0)]
+    per_hour = {"15m": 4, "30m": 2, "1h": 1, "2h": 0.5, "4h": 0.25}.get(TIMEFRAME, 1)
+    need = int(days * 24 * per_hour) + 400                       # period + warm-up
+    start_ms = int(time.time() * 1000) - days * 86400000
+    pos = margin * leverage
+    liq_dist = max(0.0, 100 / leverage - MMR_PCT)                 # % move that liquidates
+
+    cands, coins, last_close = [], 0, {}
+    for sym in SYMBOLS:
+        try:
+            C, src = fetch_history(sym, TIMEFRAME, need)
+            H, _ = fetch_history(sym, HTF, max(need // 4 + EMA_LEN + 50, 300), source=src)
+        except Exception as e:
+            print("ERROR", e)
+            continue
+        coins += 1
+        last_close[sym] = C[-1]["c"]
+        for side in ("LONG", "SHORT"):
+            for s in setups_for(C, H, side):
+                if s["score"] < MIN_SCORE or sl_pct(s) < MIN_SL_PCT or s["time"] < start_ms:
+                    continue
+                liq_px = s["entry"] * (1 - liq_dist / 100) if side == "LONG" else s["entry"] * (1 + liq_dist / 100)
+                liquidates = sl_pct(s) >= liq_dist                  # SL beyond liquidation
+                stop = liq_px if liquidates else s["sl"]
+                res = {}
+                for lbl, kind, v in exits:
+                    px, idx = _exit_detail(C, s, side, kind, v, stop)
+                    res[lbl] = (px, C[idx]["ct"] if idx is not None else None)
+                cands.append({"sym": sym, "side": side, "t": s["time"], "entry": s["entry"], "res": res,
+                              "liq": liquidates, "liq_px": liq_px})
+        print(f"{sym}: {sum(1 for c in cands if c['sym'] == sym)} setups")
+        time.sleep(0.1)
+    cands.sort(key=lambda c: c["t"])
+
+    def pnl(c, px):
+        if c["liq"] and (px <= c["liq_px"] if c["side"] == "LONG" else px >= c["liq_px"]):
+            return -margin                                        # liquidation takes the whole margin
+        move = (px - c["entry"]) / c["entry"] if c["side"] == "LONG" else (c["entry"] - px) / c["entry"]
+        return max(-margin, pos * move) - pos * FEE_PCT / 100
+
+    results = []
+    for lbl, _, _ in exits:
+        free, open_ = balance, {}                                  # open_: sym -> (close_t, margin+pnl)
+        taken = skipped_cash = skipped_coin = wins = liqs = 0
+        pnls, fees = [], 0.0
+        peak = low_eq = balance
+        max_dd = 0.0
+        max_open = 0
+
+        def settle(until):
+            nonlocal free, peak, max_dd
+            for sym_, (ct, back) in sorted(open_.items(), key=lambda kv: kv[1][0] or 1e20):
+                if ct is not None and ct <= until:
+                    free += back
+                    del open_[sym_]
+                    eq = free + margin * len(open_)
+                    peak = max(peak, eq)
+                    max_dd = max(max_dd, peak - eq)
+
+        for c in cands:
+            settle(c["t"])
+            if c["sym"] in open_:
+                skipped_coin += 1
+                continue
+            if free < margin:
+                skipped_cash += 1
+                continue
+            px, ct = c["res"][lbl]
+            free -= margin
+            taken += 1
+            if px is None:                                         # still open: mark to market
+                p = pnl(c, last_close[c["sym"]])
+                open_[c["sym"]] = (None, margin + p)
+                pnls.append(("open", p))
+            else:
+                p = pnl(c, px)
+                open_[c["sym"]] = (ct, margin + p)
+                pnls.append(("closed", p))
+                wins += p > 0
+                liqs += c["liq"] and p <= -margin * 0.99
+            fees += pos * FEE_PCT / 100
+            max_open = max(max_open, len(open_))
+        settle(1e20)
+        unreal = sum(back - margin for ct, back in open_.values())
+        final = free + margin * len(open_) + unreal
+        closed = [p for k, p in pnls if k == "closed"]
+        streak = worst = 0
+        for p in closed:
+            streak = streak + 1 if p < 0 else 0
+            worst = max(worst, streak)
+        results.append({"lbl": lbl, "final": final, "taken": taken, "closed": len(closed),
+                        "open": len(open_), "unreal": unreal, "wins": wins, "fees": fees,
+                        "dd": max_dd, "max_open": max_open, "skip_cash": skipped_cash,
+                        "skip_coin": skipped_coin, "best": max(closed, default=0),
+                        "worst": min(closed, default=0), "streak": worst, "liqs": liqs})
+
+    head = (f"## Account simulation: ${balance:g} start, ${margin:g} × {leverage}x per trade "
+            f"(position ${pos:g}), last {days} days\n\n"
+            f"{TIMEFRAME} chart, {HTF} trend, score ≥{MIN_SCORE}, SL ≥{MIN_SL_PCT}%, {coins} futures coins, "
+            f"fees {FEE_PCT:.2f}% round trip. One position per coin; a trade is skipped if free balance < ${margin:g}.\n\n"
+            "| Exit | Final balance | Return | Trades | Win% | Max drawdown | Loss streak | Best / worst trade | Fees paid |\n"
+            "|---|---|---|---|---|---|---|---|---|\n")
+    rows = "\n".join(
+        f"| {r['lbl']} | ${r['final']:.2f} | {(r['final'] / balance - 1) * 100:+.1f}% | {r['taken']} "
+        f"| {(r['wins'] / r['closed'] * 100 if r['closed'] else 0):.0f}% | −${r['dd']:.2f} | {r['streak']} "
+        f"| {money(r['best'])} / {money(r['worst'])} | ${r['fees']:.2f} |" for r in results)
+    notes = (f"\n\nLiquidation at {leverage}x is ~{liq_dist:.1f}% away; trades whose SL was further than that "
+             "count as liquidated (−margin). Still-open trades are valued at the last price. "
+             "Funding and slippage are not included. Past results do not guarantee future results.\n")
+    report = head + rows + notes
+    print(report)
+    if os.getenv("GITHUB_STEP_SUMMARY"):
+        with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
+            f.write(report)
+
+    msg = (f"💼 <b>Account backtest</b> (last {days} days)\n"
+           f"${balance:g} start, ${margin:g} × {leverage}x per trade, {coins} coins, {TIMEFRAME}\n")
+    for r in results:
+        ret = (r["final"] / balance - 1) * 100
+        msg += (f"\n<b>{r['lbl']}</b>: ${balance:g} → <b>${r['final']:.2f}</b> ({ret:+.1f}%)\n"
+                f"{r['taken']} trades, win {(r['wins'] / r['closed'] * 100 if r['closed'] else 0):.0f}%, "
+                f"max drawdown −${r['dd']:.2f}, loss streak {r['streak']}\n"
+                f"fees ${r['fees']:.2f}"
+                + (f", {r['open']} still open ({money(r['unreal'])})" if r["open"] else "")
+                + (f", skipped {r['skip_cash']} (no free balance)" if r["skip_cash"] else "")
+                + (f", {r['liqs']} liquidated" if r["liqs"] else "") + "\n")
+    msg += "\nFunding & slippage not included. Full table: GitHub → Actions → run summary."
+    tg(msg)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--test", action="store_true", help="send a Telegram test message")
     ap.add_argument("--backtest", action="store_true", help="backtest on history")
     ap.add_argument("--candles", type=int, default=5000, help="candles per coin for backtest")
+    ap.add_argument("--account", action="store_true", help="simulate a real account over the last N days")
+    ap.add_argument("--balance", type=float, default=100)
+    ap.add_argument("--margin", type=float, default=5)
+    ap.add_argument("--leverage", type=int, default=10)
+    ap.add_argument("--days", type=int, default=30)
     args = ap.parse_args()
     resolve_symbols()
     if args.test:
@@ -895,6 +1060,9 @@ def main():
         sys.exit(0 if ok else 1)
     if args.backtest:
         run_backtest(args.candles)
+        return
+    if args.account:
+        run_account(args.balance, args.margin, args.leverage, args.days)
         return
     run_scan()
 

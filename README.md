@@ -58,7 +58,8 @@ Repo → **Settings → Secrets and variables → Actions → New repository sec
 1. Repo → **Actions** tab → "I understand... enable" irundha click pannu.
 2. **S&D Signal Bot → Run workflow → mode: test** → Run.
 3. Telegram-la "S&D bot connected!" vandhaa setup correct.
-4. Apram **mode: backtest** run pannu (30 coins-ku 3–5 nimisham aagum). Kadandha ~30 naal-la strategy eppadi perform pannuchu-nu result Telegram-kum Actions summary-kum varum.
+4. **mode: account** run pannu: $100 account, $5 × 10x per trade, last 30 days-la evvalavu aagirukkum-nu kaatum (numbers maathalaam).
+5. Apram **mode: backtest** run pannu (30 coins-ku 3–5 nimisham aagum). Kadandha ~30 naal-la strategy eppadi perform pannuchu-nu result Telegram-kum Actions summary-kum varum.
 
 Adhukkapram automatic-a ovvoru 5 min-kum scan aagum. Onnum panna vendaam.
 
