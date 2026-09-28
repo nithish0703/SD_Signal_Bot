@@ -67,6 +67,10 @@ jobs:
           MARGIN_USD: ${{ vars.MARGIN_USD }}
           RISK_USD: ${{ vars.RISK_USD }}
           MAX_LEVERAGE: ${{ vars.MAX_LEVERAGE }}
+          FILTER_HTF_ADX: ${{ vars.FILTER_HTF_ADX }}
+          FILTER_ADX: ${{ vars.FILTER_ADX }}
+          FILTER_CHOP: ${{ vars.FILTER_CHOP }}
+          FILTER_SLOPE: ${{ vars.FILTER_SLOPE }}
         run: |
           MODE="${{ github.event.inputs.mode }}"
           if [ "$MODE" = "test" ]; then python bot.py --test

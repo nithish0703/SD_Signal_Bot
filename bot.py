@@ -62,6 +62,11 @@ SIGNAL_LOOKBACK = 3        # only signal if confirmation candle is among last 3 
 MIN_SCORE = 5              # 6 keys score needed to send a signal (6 = A+, 5 = A)
 SL_BUFFER_ATR = 0.1        # stop loss buffer below/above the zone
 MIN_SL_PCT = 1.0           # skip trades whose stop is closer than 1% (fees would eat the profit)
+# Market-regime filters (0 = off). Turn on only what the backtest shows is consistently better.
+FILTER_HTF_ADX = 0         # e.g. 20: skip signals when higher-TF ADX is below this (no trend)
+FILTER_ADX = 0             # e.g. 20: same on the entry timeframe
+FILTER_CHOP = 0            # e.g. 50: skip signals when Choppiness Index is above this (sideways)
+FILTER_SLOPE = 0           # e.g. 1.0: EMA50 must have moved >= this many ATRs in 20 candles
 TRAIL_ATR = 3.0            # exit plan: trailing stop = 3 x ATR (best exit in the 1h backtest)
 SIMPLE_TP_R = 2.0          # simple alternative exit: fixed 2R target
 MAX_TRADE_DAYS = 30        # tracked trades still open after this are closed at market
@@ -100,6 +105,10 @@ MIN_SCORE = max(1, min(6, _env_num("MIN_SCORE", MIN_SCORE, int)))
 MIN_SL_PCT = _env_num("MIN_SL_PCT", MIN_SL_PCT)
 FEE_PCT = _env_num("FEE_PCT", FEE_PCT)
 TRAIL_ATR = _env_num("TRAIL_ATR", TRAIL_ATR)
+FILTER_HTF_ADX = _env_num("FILTER_HTF_ADX", FILTER_HTF_ADX)
+FILTER_ADX = _env_num("FILTER_ADX", FILTER_ADX)
+FILTER_CHOP = _env_num("FILTER_CHOP", FILTER_CHOP)
+FILTER_SLOPE = _env_num("FILTER_SLOPE", FILTER_SLOPE)
 _m = [x.strip() for x in os.getenv("MARGIN_USD", "").split(",") if x.strip()]
 try:
     MARGIN_OPTIONS = [float(x) for x in _m] or MARGIN_OPTIONS
@@ -320,6 +329,48 @@ def atr(h, l, c, n):
     return out
 
 
+def adx(h, l, c, n=14):
+    """Wilder's ADX: trend strength 0-100 (below ~20 = no trend / choppy)."""
+    size = len(c)
+    out = [None] * size
+    if size < 2 * n + 1:
+        return out
+    tr, pdm, mdm = [0.0], [0.0], [0.0]
+    for i in range(1, size):
+        up, dn = h[i] - h[i - 1], l[i - 1] - l[i]
+        pdm.append(up if up > dn and up > 0 else 0.0)
+        mdm.append(dn if dn > up and dn > 0 else 0.0)
+        tr.append(max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1])))
+    atr_s, p_s, m_s = sum(tr[1:n + 1]), sum(pdm[1:n + 1]), sum(mdm[1:n + 1])
+    dx = []
+    for i in range(n, size):
+        if i > n:
+            atr_s = atr_s - atr_s / n + tr[i]
+            p_s = p_s - p_s / n + pdm[i]
+            m_s = m_s - m_s / n + mdm[i]
+        pdi = 100 * p_s / atr_s if atr_s else 0
+        mdi = 100 * m_s / atr_s if atr_s else 0
+        dx.append(100 * abs(pdi - mdi) / (pdi + mdi) if pdi + mdi else 0)
+        if len(dx) == n:
+            out[i] = sum(dx) / n
+        elif len(dx) > n:
+            out[i] = (out[i - 1] * (n - 1) + dx[-1]) / n
+    return out
+
+
+def chop(h, l, c, n=14):
+    """Choppiness Index: above ~50-60 = sideways, below ~40 = trending."""
+    import math
+    size = len(c)
+    out = [None] * size
+    tr = [h[0] - l[0]] + [max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1])) for i in range(1, size)]
+    for i in range(n, size):
+        rng = max(h[i - n + 1:i + 1]) - min(l[i - n + 1:i + 1])
+        if rng > 0:
+            out[i] = 100 * math.log10(sum(tr[i - n + 1:i + 1]) / rng) / math.log10(n)
+    return out
+
+
 def pivots(vals, p, is_high):
     res = []
     for i in range(p, len(vals) - p):
@@ -347,8 +398,11 @@ def find_setups(C, H):
     pl = pivots(l, PIVOT_LEN, False)
     ph_idx = [p[0] for p in ph]
 
+    ADX = adx(h, l, cl)
+    CH = chop(h, l, cl)
     hc = [x["c"] for x in H]
     he = ema(hc, EMA_LEN)
+    HADX = adx([x["h"] for x in H], [x["l"] for x in H], hc)
     hct = [x["ct"] for x in H]
 
     setups = []
@@ -365,6 +419,11 @@ def find_setups(C, H):
         if a and (j - i + 1) >= IMPULSE_MIN_CANDLES and (cl[j] - o[i]) >= IMPULSE_ATR_MULT * a:
             s = _evaluate(C, o, h, l, cl, E, A, ph, pl, ph_idx, hc, he, hct, base, i, j)
             if s:
+                e, k = s["e"], bisect.bisect_right(hct, C[s["e"]]["ct"]) - 1
+                s["adx"] = ADX[e] or 0.0
+                s["chop"] = CH[e] if CH[e] is not None else 100.0
+                s["hadx"] = HADX[k] if k >= 0 and HADX[k] is not None else 0.0
+                s["slope"] = ((E[e] - E[e - 20]) / A[e]) if E[e - 20] is not None and A[e] else 0.0
                 setups.append(s)
         i = j + 1
     return setups
@@ -468,11 +527,33 @@ def fee_r(s):
     return FEE_PCT / sl_pct(s)
 
 
+def passes_filters(s):
+    """Skip choppy / sideways markets according to the FILTER_* settings."""
+    if FILTER_HTF_ADX and s.get("hadx", 0) < FILTER_HTF_ADX:
+        return False
+    if FILTER_ADX and s.get("adx", 0) < FILTER_ADX:
+        return False
+    if FILTER_CHOP and s.get("chop", 100) > FILTER_CHOP:
+        return False
+    if FILTER_SLOPE and s.get("slope", 0) < FILTER_SLOPE:
+        return False
+    return True
+
+
+def active_filters():
+    f = []
+    if FILTER_HTF_ADX: f.append(f"ADX {HTF} ≥{FILTER_HTF_ADX:g}")
+    if FILTER_ADX: f.append(f"ADX {TIMEFRAME} ≥{FILTER_ADX:g}")
+    if FILTER_CHOP: f.append(f"CHOP ≤{FILTER_CHOP:g}")
+    if FILTER_SLOPE: f.append(f"EMA slope ≥{FILTER_SLOPE:g} ATR")
+    return ", ".join(f) or "none"
+
+
 def live_setups(C, H, side):
     n = len(C)
     out = []
     for s in setups_for(C, H, side):
-        if s["e"] < n - SIGNAL_LOOKBACK or sl_pct(s) < MIN_SL_PCT:
+        if s["e"] < n - SIGNAL_LOOKBACK or sl_pct(s) < MIN_SL_PCT or not passes_filters(s):
             continue
         after = C[s["e"] + 1:]
         if side == "LONG":
@@ -564,7 +645,8 @@ def signal_message(sym, side, s, source):
         + f"💸 Fees ~${z['fee']:.2f} ({fee_r(s):.2f}R). Limit orders cut this.\n\n"
         f"{zone} zone: {fp(s['bot'])} – {fp(s['top'])} ({s['ztype']})\n"
         f"{checks}\n"
-        f"✅ Trend confirmed (EMA{EMA_LEN} {TIMEFRAME} + {HTF})\n\n"
+        f"✅ Trend confirmed (EMA{EMA_LEN} {TIMEFRAME} + {HTF})\n"
+        f"📐 ADX {HTF} {s.get('hadx', 0):.0f} | ADX {TIMEFRAME} {s.get('adx', 0):.0f} | CHOP {s.get('chop', 0):.0f}\n\n"
         f"🕒 {t}\n📊 {SOURCE_LABEL.get(source, source)}\n"
         f"<i>Manual trade only. Check the chart before entering. Not financial advice.</i>"
     )
@@ -816,6 +898,58 @@ def _stats(trades, key, fee_pct):
             (sum(wins) / len(wins)) if wins else 0.0, worst)
 
 
+FILTER_TESTS = [
+    ("No filter", lambda t: True),
+    ("ADX HTF ≥20", lambda t: t["hadx"] >= 20),
+    ("ADX HTF ≥25", lambda t: t["hadx"] >= 25),
+    ("ADX TF ≥20", lambda t: t["adx"] >= 20),
+    ("ADX TF ≥25", lambda t: t["adx"] >= 25),
+    ("CHOP ≤50", lambda t: t["chop"] <= 50),
+    ("CHOP ≤45", lambda t: t["chop"] <= 45),
+    ("EMA slope ≥1 ATR", lambda t: t["slope"] >= 1),
+    ("EMA slope ≥2 ATR", lambda t: t["slope"] >= 2),
+    ("ADX HTF ≥20 + CHOP ≤50", lambda t: t["hadx"] >= 20 and t["chop"] <= 50),
+]
+FILTER_VARS = {"ADX HTF ≥20": "FILTER_HTF_ADX=20", "ADX HTF ≥25": "FILTER_HTF_ADX=25",
+               "ADX TF ≥20": "FILTER_ADX=20", "ADX TF ≥25": "FILTER_ADX=25",
+               "CHOP ≤50": "FILTER_CHOP=50", "CHOP ≤45": "FILTER_CHOP=45",
+               "EMA slope ≥1 ATR": "FILTER_SLOPE=1", "EMA slope ≥2 ATR": "FILTER_SLOPE=2",
+               "ADX HTF ≥20 + CHOP ≤50": "FILTER_HTF_ADX=20 and FILTER_CHOP=50"}
+
+
+def market_filter_table(trades):
+    """Compare regime filters. A filter only counts as 'consistent' if it is profitable after fees
+    in the first half, the second half AND the last 30 days (with >= 10 trades in each)."""
+    if not trades:
+        return "### Market filters\n\nno trades", []
+    t0, t1 = min(t["time"] for t in trades), max(t["time"] for t in trades)
+    mid, last30 = (t0 + t1) / 2, time.time() * 1000 - 30 * 86400000
+    periods = [("1st half", lambda t: t["time"] < mid), ("2nd half", lambda t: t["time"] >= mid),
+               ("Last 30d", lambda t: t["time"] >= last30)]
+    rows, consistent = [], []
+    for fname, f in FILTER_TESTS:
+        sel = [t for t in trades if t["score"] >= MIN_SCORE and f(t)]
+        for ex in ("Trail 3 ATR", "Fixed 2R"):
+            n, w, avg, tot, _, _ = _stats(sel, ex, FEE_PCT)
+            cells, ok = [], n > 0
+            for _, pf in periods:
+                pn, _, pavg, _, _, _ = _stats([t for t in sel if pf(t)], ex, FEE_PCT)
+                cells.append(f"{pavg:+.2f} ({pn})")
+                ok = ok and pn >= 10 and pavg > 0
+            mark = "✅" if ok else ""
+            name = fname.replace("HTF", HTF).replace("TF ", f"{TIMEFRAME} ")
+            rows.append(f"| {name} | {ex} | {n} | {w:.0f}% | {avg:+.2f}R | " + " | ".join(cells) + f" | {mark} |")
+            if ok:
+                consistent.append(f"✅ {name}, {ex}: {avg:+.2f}R/trade, {n} trades"
+                                  + (f" → set {FILTER_VARS[fname]}" if fname in FILTER_VARS else ""))
+    table = ("### Market filters (skip choppy / sideways markets)\n\n"
+             f"Score ≥{MIN_SCORE}, SL ≥{MIN_SL_PCT}%, market fees. Cells = net R per trade (trades). "
+             "✅ = profitable in every period.\n\n"
+             "| Filter | Exit | Trades | Win% | Net/trade | 1st half | 2nd half | Last 30d | Consistent |\n"
+             "|---|---|---|---|---|---|---|---|---|\n" + "\n".join(rows))
+    return table, consistent
+
+
 def run_backtest(total):
     trades, per_coin = [], []
     for sym in SYMBOLS:
@@ -831,6 +965,7 @@ def run_backtest(total):
                 if s["score"] < 5 or sl_pct(s) < MIN_SL_PCT:
                     continue
                 coin.append({"sym": sym, "score": s["score"], "slp": sl_pct(s), "time": s["time"],
+                             "adx": s["adx"], "hadx": s["hadx"], "chop": s["chop"], "slope": s["slope"],
                              "res": {lbl: run_exit(C, s, side, k, v) for lbl, k, v in EXITS}})
         trades += coin
         days = (C[-1]["ct"] - C[0]["t"]) / 86400000
@@ -854,10 +989,12 @@ def run_backtest(total):
                 best.setdefault(gname, []).append((avg, lbl, n, w, tot))
         sections.append(f"### {gname}, SL ≥{MIN_SL_PCT}%\n\n" + head + "\n".join(rows))
 
+    filter_section, consistent = market_filter_table(trades)
     report = (f"## Exit comparison (~{total} candles of {TIMEFRAME}, {len(per_coin)} coins)\n\n"
               f"Net = average R per trade after fees (market {FEE_PCT:.2f}%, limit {MAKER_FEE_PCT:.2f}% round trip). "
               "Positive = profitable. ATR TPs are never closer than 1R. Trailing stops start at the normal SL.\n\n"
               + "\n\n".join(sections) +
+              "\n\n" + filter_section +
               f"\n\n### Per coin (score ≥{MIN_SCORE}, Fixed 1R, market fees)\n\n"
               "| Coin | Period | Trades | Win% | Net total |\n|---|---|---|---|---|\n" + "\n".join(per_coin) +
               "\n\n_Slippage and funding are not included. Past results do not guarantee future results._\n")
@@ -874,6 +1011,8 @@ def run_backtest(total):
             msg += "not enough trades\n"
         for i, (avg, lbl, n, w, tot) in enumerate(ranked, 1):
             msg += f"{i}. {lbl}: {avg:+.2f}R/trade, win {w:.0f}%, {n} trades ({tot:+.1f}R)\n"
+    msg += "\n<b>Market filters</b> (positive in 1st half, 2nd half AND last 30 days):\n"
+    msg += ("\n".join(consistent[:5]) if consistent else "none – no filter was consistently profitable") + "\n"
     msg += "\nFull table: GitHub → Actions → this run's summary."
     tg(msg)
 
@@ -931,7 +1070,8 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0):
         last_close[sym] = C[-1]["c"]
         for side in ("LONG", "SHORT"):
             for s in setups_for(C, H, side):
-                if s["score"] < MIN_SCORE or sl_pct(s) < MIN_SL_PCT or s["time"] < start_ms:
+                if (s["score"] < MIN_SCORE or sl_pct(s) < MIN_SL_PCT or s["time"] < start_ms
+                        or not passes_filters(s)):
                     continue
                 if mode == "risk":
                     z = sizing(s, side, margin)

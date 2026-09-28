@@ -84,6 +84,18 @@ Variable add panninaa adutha run-la irundhu apply aagum. Delete panninaa default
 | `RISK_USD` | `1` | SL hit aana max loss ($). Unga total account-la ~1% vechukkonga |
 | `MAX_LEVERAGE` | `20` | Idha thaandi leverage suggest pannaadhu |
 
+### Choppy / sideways market filters
+| Variable | Default | Meaning |
+|---|---|---|
+| `FILTER_HTF_ADX` | `0` (off) | e.g. `20`: 4h ADX 20-ku keezha (trend illa) irundha signal skip |
+| `FILTER_ADX` | `0` (off) | Adhe, entry timeframe (1h) ADX-ku |
+| `FILTER_CHOP` | `0` (off) | e.g. `50`: Choppiness Index 50-ku mela (sideways) irundha skip |
+| `FILTER_SLOPE` | `0` (off) | e.g. `1`: EMA50 20 candles-la 1 ATR alavu move aagala-na skip |
+
+**Backtest** run panna, "Market filters" table-la ovvoru filter-um mudhal paadhi, rendaam paadhi, last 30 days moonulayum
+evvalavu-nu kaatum. ✅ vandha filter mattum on pannunga (Telegram-la endha variable set pannanum-nu-um solli kudukkum).
+Ellaa period-layum positive-a illadha filter-a on panna vendaam: adhu luck-a irukkalaam.
+
 ### Position size & leverage
 Ovvoru signal-lum bot calculate pannum: `Leverage = RISK_USD ÷ (MARGIN_USD × SL%)`.
 Example: SL 2% → $5 margin-ku **10x**, $8 margin-ku **6x**. Rendulayum position ~$50, SL hit aana loss **~$1**.
