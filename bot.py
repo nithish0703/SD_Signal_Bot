@@ -352,7 +352,7 @@ def _evaluate(C, o, h, l, cl, E, A, ph, pl, ph_idx, hc, he, hct, base, i, j):
     return {"base": base, "tap": t, "e": e, "zone_time": C[base]["t"], "time": C[e]["ct"],
             "entry": entry, "sl": sl, "tp1": tp1, "tp2": tp2, "tp3": tp3,
             "top": top, "bot": bot, "ztype": ztype, "checks": checks, "score": score,
-            "ema_conf": ema_conf, "sr_conf": sr_conf}
+            "ema_conf": ema_conf, "sr_conf": sr_conf, "atr": A[e] or a}
 
 
 def unflip(s):
@@ -510,30 +510,73 @@ def run_scan():
 
 
 def simulate(C, s, side, r_target):
-    """Gross result in R for one setup (fees handled separately)."""
+    """Gross result in R for a fixed R-multiple target (fees handled separately)."""
     risk = abs(s["entry"] - s["sl"])
-    tp = s["entry"] + r_target * risk if side == "LONG" else s["entry"] - r_target * risk
+    return _simulate_tp(C, s, side, r_target * risk)
+
+
+def _simulate_tp(C, s, side, tp_dist):
+    risk = abs(s["entry"] - s["sl"])
+    tp = s["entry"] + tp_dist if side == "LONG" else s["entry"] - tp_dist
     for x in C[s["e"] + 1:]:
         hit_sl = x["l"] <= s["sl"] if side == "LONG" else x["h"] >= s["sl"]
         hit_tp = x["h"] >= tp if side == "LONG" else x["l"] <= tp
         if hit_sl:
             return -1.0          # if SL and TP in the same candle, count it as a loss
         if hit_tp:
-            return r_target
+            return tp_dist / risk
     return None                  # still open
 
 
-BT_TARGETS = (1.0, 1.5, 2.0)
+def _simulate_trail(C, s, side, k):
+    """ATR trailing stop: stop follows the best price by k x ATR, never moves back."""
+    risk = abs(s["entry"] - s["sl"])
+    dist = k * s["atr"]
+    stop = s["sl"]
+    for x in C[s["e"] + 1:]:
+        if side == "LONG":
+            if x["l"] <= stop:                   # check the stop set by earlier candles first
+                return (min(x["o"], stop) - s["entry"]) / risk
+            stop = max(stop, x["h"] - dist)
+        else:
+            if x["h"] >= stop:
+                return (s["entry"] - max(x["o"], stop)) / risk
+            stop = min(stop, x["l"] + dist)
+    return None
+
+
+# (label, kind, value). "atr" TP is never closer than 1R.
+EXITS = [
+    ("Fixed 1R", "fixed", 1.0), ("Fixed 1.5R", "fixed", 1.5), ("Fixed 2R", "fixed", 2.0),
+    ("TP 1.5 ATR", "atr", 1.5), ("TP 2 ATR", "atr", 2.0), ("TP 3 ATR", "atr", 3.0),
+    ("Trail 2 ATR", "trail", 2.0), ("Trail 3 ATR", "trail", 3.0),
+]
 MAKER_FEE_PCT = 0.04
 
 
-def _stats(trades, target, fee_pct):
-    """trades: list of dicts with 'res' {target: gross R} and 'slp' (SL %)."""
-    rs = [t["res"][target] - fee_pct / t["slp"] for t in trades if t["res"][target] is not None]
-    if not rs:
-        return 0, 0.0, 0.0, 0.0
-    wins = sum(1 for t in trades if t["res"][target] is not None and t["res"][target] > 0)
-    return len(rs), wins / len(rs) * 100, sum(rs) / len(rs), sum(rs)
+def run_exit(C, s, side, kind, v):
+    if kind == "fixed":
+        return simulate(C, s, side, v)
+    if kind == "atr":
+        risk = abs(s["entry"] - s["sl"])
+        return _simulate_tp(C, s, side, max(v * s["atr"], risk))
+    return _simulate_trail(C, s, side, v)
+
+
+def _stats(trades, key, fee_pct):
+    """-> (closed trades, win %, net R per trade, net total R, avg win R, max losing streak)."""
+    closed = [t for t in trades if t["res"][key] is not None]
+    if not closed:
+        return 0, 0.0, 0.0, 0.0, 0.0, 0
+    closed.sort(key=lambda t: t["time"])
+    rs = [t["res"][key] - fee_pct / t["slp"] for t in closed]
+    wins = [t["res"][key] for t in closed if t["res"][key] > 0]
+    streak = worst = 0
+    for r in rs:
+        streak = streak + 1 if r < 0 else 0
+        worst = max(worst, streak)
+    return (len(rs), len(wins) / len(rs) * 100, sum(rs) / len(rs), sum(rs),
+            (sum(wins) / len(wins)) if wins else 0.0, worst)
 
 
 def run_backtest(total):
@@ -548,53 +591,37 @@ def run_backtest(total):
         coin = []
         for side in ("LONG", "SHORT"):
             for s in setups_for(C, H, side):
-                if s["score"] < 5:
+                if s["score"] < 5 or sl_pct(s) < MIN_SL_PCT:
                     continue
-                coin.append({"sym": sym, "score": s["score"], "slp": sl_pct(s),
-                             "res": {r: simulate(C, s, side, r) for r in BT_TARGETS}})
+                coin.append({"sym": sym, "score": s["score"], "slp": sl_pct(s), "time": s["time"],
+                             "res": {lbl: run_exit(C, s, side, k, v) for lbl, k, v in EXITS}})
         trades += coin
         days = (C[-1]["ct"] - C[0]["t"]) / 86400000
-        mine = [t for t in coin if t["score"] >= MIN_SCORE and t["slp"] >= MIN_SL_PCT]
-        n, w, avg, tot = _stats(mine, 1.0, FEE_PCT)
+        mine = [t for t in coin if t["score"] >= MIN_SCORE]
+        n, w, _, tot, _, _ = _stats(mine, "Fixed 1R", FEE_PCT)
         per_coin.append(f"| {sym} | {days:.0f}d | {n} | {w:.0f}% | {tot:+.1f}R |")
         print(per_coin[-1])
 
-    variants = [
-        ("Score ≥5, any SL", lambda t: t["score"] >= 5),
-        (f"Score ≥5, SL ≥{MIN_SL_PCT}%", lambda t: t["score"] >= 5 and t["slp"] >= MIN_SL_PCT),
-        ("Score 6, any SL", lambda t: t["score"] >= 6),
-        (f"Score 6, SL ≥{MIN_SL_PCT}%", lambda t: t["score"] >= 6 and t["slp"] >= MIN_SL_PCT),
-    ]
+    groups = [("Score ≥5", [t for t in trades if t["score"] >= 5]),
+              ("Score 6", [t for t in trades if t["score"] >= 6])]
+    head = ("| Exit | Trades | Win% | Avg win | Net/trade (market) | Net/trade (limit) | Total (market) | Max loss streak |\n"
+            "|---|---|---|---|---|---|---|---|\n")
+    sections, best = [], {}
+    for gname, sel in groups:
+        rows = []
+        for lbl, _, _ in EXITS:
+            n, w, avg, tot, aw, ls = _stats(sel, lbl, FEE_PCT)
+            _, _, avg_l, _, _, _ = _stats(sel, lbl, MAKER_FEE_PCT)
+            rows.append(f"| {lbl} | {n} | {w:.0f}% | {aw:.2f}R | {avg:+.2f}R | {avg_l:+.2f}R | {tot:+.1f}R | {ls} |")
+            if n >= 15:
+                best.setdefault(gname, []).append((avg, lbl, n, w, tot))
+        sections.append(f"### {gname}, SL ≥{MIN_SL_PCT}%\n\n" + head + "\n".join(rows))
 
-    def row(name, sel, fee):
-        n, w, _, _ = _stats(sel, 1.0, fee)
-        cells = []
-        for r in BT_TARGETS:
-            _, _, avg, tot = _stats(sel, r, fee)
-            cells.append(f"{avg:+.2f} ({tot:+.0f}R)")
-        return f"| {name} | {n} | {w:.0f}% | " + " | ".join(cells) + " |"
-
-    head = "| Filter | Trades | Win% @1R | Net @1R | Net @1.5R | Net @2R |\n|---|---|---|---|---|---|\n"
-    taker = "\n".join(row(n, [t for t in trades if f(t)], FEE_PCT) for n, f in variants)
-    maker = "\n".join(row(n, [t for t in trades if f(t)], MAKER_FEE_PCT) for n, f in variants)
-    days_note = f"~{total} candles of {TIMEFRAME} per coin, {len(per_coin)} coins"
-
-    # best variant/target with fees, for the Telegram summary
-    best = None
-    for n, f in variants:
-        sel = [t for t in trades if f(t)]
-        for r in BT_TARGETS:
-            cnt, w, avg, tot = _stats(sel, r, FEE_PCT)
-            if cnt >= 20 and (best is None or avg > best[3]):
-                best = (n, r, cnt, avg, tot, w)
-    cur = [t for t in trades if t["score"] >= MIN_SCORE and t["slp"] >= MIN_SL_PCT]
-    cn, cw, cavg, ctot = _stats(cur, 1.0, FEE_PCT)
-
-    report = (f"## Backtest ({days_note})\n\n"
-              f"Net = average R per trade **after fees** (total in brackets). Positive = profitable.\n\n"
-              f"### Market orders ({FEE_PCT:.2f}% round trip)\n\n{head}{taker}\n\n"
-              f"### Limit orders ({MAKER_FEE_PCT:.2f}% round trip)\n\n{head}{maker}\n\n"
-              f"### Per coin (current settings: score ≥{MIN_SCORE}, SL ≥{MIN_SL_PCT}%, TP 1R, {FEE_PCT:.2f}% fees)\n\n"
+    report = (f"## Exit comparison (~{total} candles of {TIMEFRAME}, {len(per_coin)} coins)\n\n"
+              f"Net = average R per trade after fees (market {FEE_PCT:.2f}%, limit {MAKER_FEE_PCT:.2f}% round trip). "
+              "Positive = profitable. ATR TPs are never closer than 1R. Trailing stops start at the normal SL.\n\n"
+              + "\n\n".join(sections) +
+              f"\n\n### Per coin (score ≥{MIN_SCORE}, Fixed 1R, market fees)\n\n"
               "| Coin | Period | Trades | Win% | Net total |\n|---|---|---|---|---|\n" + "\n".join(per_coin) +
               "\n\n_Slippage and funding are not included. Past results do not guarantee future results._\n")
     print(report)
@@ -602,13 +629,15 @@ def run_backtest(total):
         with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
             f.write(report)
 
-    msg = (f"📈 <b>Backtest done</b> ({TIMEFRAME}, {len(per_coin)} coins, fees {FEE_PCT:.2f}%)\n\n"
-           f"<b>Current settings</b> (score ≥{MIN_SCORE}, SL ≥{MIN_SL_PCT}%, TP 1R):\n"
-           f"{cn} trades, win {cw:.0f}%, net {cavg:+.2f}R/trade ({ctot:+.1f}R)\n")
-    if best:
-        msg += (f"\n<b>Best after fees</b>: {best[0]}, TP {best[1]}R\n"
-                f"{best[2]} trades, win {best[5]:.0f}%, net {best[3]:+.2f}R/trade ({best[4]:+.1f}R)\n")
-    msg += "\nFull table (market vs limit orders): GitHub → Actions → this run's summary."
+    msg = f"📈 <b>Exit backtest</b> ({TIMEFRAME}, {len(per_coin)} coins, market fees {FEE_PCT:.2f}%)\n"
+    for gname, _ in groups:
+        ranked = sorted(best.get(gname, []), reverse=True)[:3]
+        msg += f"\n<b>{gname}</b> – top exits:\n"
+        if not ranked:
+            msg += "not enough trades\n"
+        for i, (avg, lbl, n, w, tot) in enumerate(ranked, 1):
+            msg += f"{i}. {lbl}: {avg:+.2f}R/trade, win {w:.0f}%, {n} trades ({tot:+.1f}R)\n"
+    msg += "\nFull table: GitHub → Actions → this run's summary."
     tg(msg)
 
 

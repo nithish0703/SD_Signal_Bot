@@ -46,7 +46,7 @@ jobs:
         run: |
           MODE="${{ github.event.inputs.mode }}"
           if [ "$MODE" = "test" ]; then python bot.py --test
-          elif [ "$MODE" = "backtest" ]; then python bot.py --backtest --candles 3000
+          elif [ "$MODE" = "backtest" ]; then python bot.py --backtest --candles 6000
           else python bot.py
           fi
 
