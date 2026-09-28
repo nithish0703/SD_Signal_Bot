@@ -60,6 +60,9 @@ MAX_TAP_BODY_ATR = 1.5     # slow momentum: no huge candle crashing into the zon
 SIGNAL_LOOKBACK = 3        # only signal if confirmation candle is among last 3 closed candles
 MIN_SCORE = 5              # 6 keys score needed to send a signal (6 = A+, 5 = A)
 SL_BUFFER_ATR = 0.1        # stop loss buffer below/above the zone
+MIN_SL_PCT = 0.5           # skip trades whose stop is closer than 0.5% (fees would eat the profit)
+FEE_PCT = 0.10             # round-trip fee in % (Binance taker 0.05% in + 0.05% out).
+                           # With limit (maker) entry + exit it is ~0.04%.
 CONFLUENCE_PAD_ATR = 0.25  # how close EMA / old S-R must be to the zone
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
@@ -71,6 +74,25 @@ TG_CHATS = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if c
 MANUAL_SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "").split(",") if s.strip()]
 if os.getenv("TOP_N", "").strip().isdigit():
     TOP_N = int(os.getenv("TOP_N"))
+
+
+def _env_num(name, default, cast=float):
+    """Read an optional GitHub repo variable (empty or invalid -> keep default)."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return cast(raw)
+    except ValueError:
+        print(f"Ignoring invalid {name}={raw!r}")
+        return default
+
+
+MIN_SCORE = max(1, min(6, _env_num("MIN_SCORE", MIN_SCORE, int)))
+MIN_SL_PCT = _env_num("MIN_SL_PCT", MIN_SL_PCT)
+FEE_PCT = _env_num("FEE_PCT", FEE_PCT)
+TIMEFRAME = os.getenv("TIMEFRAME", "").strip() or TIMEFRAME
+HTF = os.getenv("HTF", "").strip() or HTF
 
 # GitHub's servers are in the US, where fapi.binance.com is blocked (HTTP 451).
 # So we try Futures first, then fall back to Binance public spot data for the same pair.
@@ -347,11 +369,20 @@ def setups_for(C, H, side):
     return [unflip(s) for s in find_setups(flip(C), flip(H))]
 
 
+def sl_pct(s):
+    return abs(s["entry"] - s["sl"]) / abs(s["entry"]) * 100
+
+
+def fee_r(s):
+    """Round-trip fee expressed in R (fraction of the risk)."""
+    return FEE_PCT / sl_pct(s)
+
+
 def live_setups(C, H, side):
     n = len(C)
     out = []
     for s in setups_for(C, H, side):
-        if s["e"] < n - SIGNAL_LOOKBACK:
+        if s["e"] < n - SIGNAL_LOOKBACK or sl_pct(s) < MIN_SL_PCT:
             continue
         after = C[s["e"] + 1:]
         if side == "LONG":
@@ -407,7 +438,8 @@ def signal_message(sym, side, s, source):
         f"Stop Loss: <code>{fp(s['sl'])}</code> ({pct(s['entry'], s['sl'])})\n"
         f"TP1 (1R): <code>{fp(s['tp1'])}</code>\n"
         f"TP2 (1.5R): <code>{fp(s['tp2'])}</code>\n"
-        f"TP3 ({rr3:.1f}R): <code>{fp(s['tp3'])}</code>\n\n"
+        f"TP3 ({rr3:.1f}R): <code>{fp(s['tp3'])}</code>\n"
+        f"💸 Fees ~{fee_r(s):.2f}R (at {FEE_PCT:.2f}% round trip). Use limit orders to cut this.\n\n"
         f"{zone} zone: {fp(s['bot'])} – {fp(s['top'])} ({s['ztype']})\n"
         f"{checks}\n"
         f"✅ Trend confirmed (EMA{EMA_LEN} {TIMEFRAME} + {HTF})\n\n"
@@ -478,6 +510,7 @@ def run_scan():
 
 
 def simulate(C, s, side, r_target):
+    """Gross result in R for one setup (fees handled separately)."""
     risk = abs(s["entry"] - s["sl"])
     tp = s["entry"] + r_target * risk if side == "LONG" else s["entry"] - r_target * risk
     for x in C[s["e"] + 1:]:
@@ -490,8 +523,21 @@ def simulate(C, s, side, r_target):
     return None                  # still open
 
 
+BT_TARGETS = (1.0, 1.5, 2.0)
+MAKER_FEE_PCT = 0.04
+
+
+def _stats(trades, target, fee_pct):
+    """trades: list of dicts with 'res' {target: gross R} and 'slp' (SL %)."""
+    rs = [t["res"][target] - fee_pct / t["slp"] for t in trades if t["res"][target] is not None]
+    if not rs:
+        return 0, 0.0, 0.0, 0.0
+    wins = sum(1 for t in trades if t["res"][target] is not None and t["res"][target] > 0)
+    return len(rs), wins / len(rs) * 100, sum(rs) / len(rs), sum(rs)
+
+
 def run_backtest(total):
-    rows, all_res = [], {1.0: [], 1.5: []}
+    trades, per_coin = [], []
     for sym in SYMBOLS:
         try:
             C, src = fetch_history(sym, TIMEFRAME, total)
@@ -499,45 +545,71 @@ def run_backtest(total):
         except Exception as e:
             print("ERROR", e)
             continue
-        res = {1.0: [], 1.5: []}
-        count = 0
+        coin = []
         for side in ("LONG", "SHORT"):
             for s in setups_for(C, H, side):
-                if s["score"] < MIN_SCORE:
+                if s["score"] < 5:
                     continue
-                count += 1
-                for r in res:
-                    out = simulate(C, s, side, r)
-                    if out is not None:
-                        res[r].append(out)
-        for r in res:
-            all_res[r] += res[r]
+                coin.append({"sym": sym, "score": s["score"], "slp": sl_pct(s),
+                             "res": {r: simulate(C, s, side, r) for r in BT_TARGETS}})
+        trades += coin
         days = (C[-1]["ct"] - C[0]["t"]) / 86400000
-        w1 = sum(1 for x in res[1.0] if x > 0)
-        w15 = sum(1 for x in res[1.5] if x > 0)
-        rows.append(f"| {sym} | {days:.0f}d | {count} | "
-                    f"{(w1 / len(res[1.0]) * 100 if res[1.0] else 0):.0f}% ({sum(res[1.0]):+.1f}R) | "
-                    f"{(w15 / len(res[1.5]) * 100 if res[1.5] else 0):.0f}% ({sum(res[1.5]):+.1f}R) |")
-        print(rows[-1])
+        mine = [t for t in coin if t["score"] >= MIN_SCORE and t["slp"] >= MIN_SL_PCT]
+        n, w, avg, tot = _stats(mine, 1.0, FEE_PCT)
+        per_coin.append(f"| {sym} | {days:.0f}d | {n} | {w:.0f}% | {tot:+.1f}R |")
+        print(per_coin[-1])
 
-    def summ(lst):
-        if not lst:
-            return "no closed trades"
-        w = sum(1 for x in lst if x > 0)
-        return f"{len(lst)} trades, win rate {w / len(lst) * 100:.0f}%, total {sum(lst):+.1f}R"
+    variants = [
+        ("Score ≥5, any SL", lambda t: t["score"] >= 5),
+        (f"Score ≥5, SL ≥{MIN_SL_PCT}%", lambda t: t["score"] >= 5 and t["slp"] >= MIN_SL_PCT),
+        ("Score 6, any SL", lambda t: t["score"] >= 6),
+        (f"Score 6, SL ≥{MIN_SL_PCT}%", lambda t: t["score"] >= 6 and t["slp"] >= MIN_SL_PCT),
+    ]
 
-    report = (f"## Backtest: {TIMEFRAME}, min score {MIN_SCORE}/6, ~{total} candles per coin\n\n"
-              "| Coin | Period | Signals | TP 1R win% | TP 1.5R win% |\n|---|---|---|---|---|\n"
-              + "\n".join(rows) +
-              f"\n\n**All coins, TP 1R:** {summ(all_res[1.0])}\n\n**All coins, TP 1.5R:** {summ(all_res[1.5])}\n\n"
-              "_Fees, slippage and funding are not included. Past results do not guarantee future results._\n")
+    def row(name, sel, fee):
+        n, w, _, _ = _stats(sel, 1.0, fee)
+        cells = []
+        for r in BT_TARGETS:
+            _, _, avg, tot = _stats(sel, r, fee)
+            cells.append(f"{avg:+.2f} ({tot:+.0f}R)")
+        return f"| {name} | {n} | {w:.0f}% | " + " | ".join(cells) + " |"
+
+    head = "| Filter | Trades | Win% @1R | Net @1R | Net @1.5R | Net @2R |\n|---|---|---|---|---|---|\n"
+    taker = "\n".join(row(n, [t for t in trades if f(t)], FEE_PCT) for n, f in variants)
+    maker = "\n".join(row(n, [t for t in trades if f(t)], MAKER_FEE_PCT) for n, f in variants)
+    days_note = f"~{total} candles of {TIMEFRAME} per coin, {len(per_coin)} coins"
+
+    # best variant/target with fees, for the Telegram summary
+    best = None
+    for n, f in variants:
+        sel = [t for t in trades if f(t)]
+        for r in BT_TARGETS:
+            cnt, w, avg, tot = _stats(sel, r, FEE_PCT)
+            if cnt >= 20 and (best is None or avg > best[3]):
+                best = (n, r, cnt, avg, tot, w)
+    cur = [t for t in trades if t["score"] >= MIN_SCORE and t["slp"] >= MIN_SL_PCT]
+    cn, cw, cavg, ctot = _stats(cur, 1.0, FEE_PCT)
+
+    report = (f"## Backtest ({days_note})\n\n"
+              f"Net = average R per trade **after fees** (total in brackets). Positive = profitable.\n\n"
+              f"### Market orders ({FEE_PCT:.2f}% round trip)\n\n{head}{taker}\n\n"
+              f"### Limit orders ({MAKER_FEE_PCT:.2f}% round trip)\n\n{head}{maker}\n\n"
+              f"### Per coin (current settings: score ≥{MIN_SCORE}, SL ≥{MIN_SL_PCT}%, TP 1R, {FEE_PCT:.2f}% fees)\n\n"
+              "| Coin | Period | Trades | Win% | Net total |\n|---|---|---|---|---|\n" + "\n".join(per_coin) +
+              "\n\n_Slippage and funding are not included. Past results do not guarantee future results._\n")
     print(report)
     if os.getenv("GITHUB_STEP_SUMMARY"):
         with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
             f.write(report)
-    tg(f"📈 <b>Backtest done</b> ({TIMEFRAME}, score ≥ {MIN_SCORE})\n"
-       f"TP 1R: {summ(all_res[1.0])}\nTP 1.5R: {summ(all_res[1.5])}\n"
-       f"Full table: GitHub → Actions → this run's summary.")
+
+    msg = (f"📈 <b>Backtest done</b> ({TIMEFRAME}, {len(per_coin)} coins, fees {FEE_PCT:.2f}%)\n\n"
+           f"<b>Current settings</b> (score ≥{MIN_SCORE}, SL ≥{MIN_SL_PCT}%, TP 1R):\n"
+           f"{cn} trades, win {cw:.0f}%, net {cavg:+.2f}R/trade ({ctot:+.1f}R)\n")
+    if best:
+        msg += (f"\n<b>Best after fees</b>: {best[0]}, TP {best[1]}R\n"
+                f"{best[2]} trades, win {best[5]:.0f}%, net {best[3]:+.2f}R/trade ({best[4]:+.1f}R)\n")
+    msg += "\nFull table (market vs limit orders): GitHub → Actions → this run's summary."
+    tg(msg)
 
 
 def main():
@@ -549,7 +621,8 @@ def main():
     resolve_symbols()
     if args.test:
         ok = tg(f"👋 <b>S&D bot connected!</b>\nCoins: {', '.join(SYMBOLS)}\n"
-                f"Timeframe: {TIMEFRAME} (trend: {HTF}), min grade: {MIN_SCORE}/6")
+                f"Timeframe: {TIMEFRAME} (trend: {HTF}), min grade: {MIN_SCORE}/6\n"
+                f"Min SL: {MIN_SL_PCT}%, fees assumed: {FEE_PCT:.2f}%")
         sys.exit(0 if ok else 1)
     if args.backtest:
         run_backtest(args.candles)

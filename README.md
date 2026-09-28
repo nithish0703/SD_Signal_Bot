@@ -57,10 +57,30 @@ Adhukkapram automatic-a ovvoru 5 min-kum scan aagum. Onnum panna vendaam.
 
 ---
 
-## Settings maatha (bot.py mela irukku)
+## Settings maatha (code edit panna vendaam)
 
-| Setting | Default | Meaning |
+GitHub repo → **Settings → Secrets and variables → Actions → Variables tab → New repository variable**.
+Variable add panninaa adutha run-la irundhu apply aagum. Delete panninaa default-ku thirumbum.
+
+| Variable | Default | Meaning |
 |---|---|---|
+| `TOP_N` | `30` | Volume-la top evvalavu coins scan pannanum |
+| `SYMBOLS` | (auto) | `BTCUSDT,ETHUSDT` maadhiri kudutha, indha coins mattum dhaan |
+| `MIN_SCORE` | `5` | `6` = A+ mattum (kammi signals, strong), `4` = adhiga signals |
+| `MIN_SL_PCT` | `0.5` | SL idha vida close-a irundha trade skip (fees profit-a saapidum) |
+| `FEE_PCT` | `0.10` | Round-trip fee %. Market order = `0.10`, limit order = `0.04` |
+| `TIMEFRAME` | `15m` | Entry timeframe (`5m`, `15m`, `1h`) |
+| `HTF` | `1h` | Trend timeframe (`1h`, `4h`) |
+
+Code-la mattum irukkira settings (`bot.py` mela): `IMPULSE_ATR_MULT`, `ZONE_MAX_AGE`, `FALLBACK_SYMBOLS`.
+
+### Fees pathi
+
+Ovvoru signal-lum `💸 Fees ~0.16R` maadhiri kaatum: andha trade-la fees unga risk-la evvalavu-nu.
+Backtest ippo fees-a kazhichu **net result** kaatum, market order vs limit order rendaiyum compare panni.
+Actions → backtest run → summary-la full table irukkum. Telegram-la current settings result + best setting varum.
+
+---|---|---|
 | `TOP_N` | `30` | Volume-la top evvalavu coins scan pannanum |
 | `FALLBACK_SYMBOLS` | 30 big coins | Top list fetch aagalana idhu use aagum |
 | `TIMEFRAME` | `15m` | Entry timeframe (`5m`, `15m`, `1h`) |
@@ -75,7 +95,7 @@ Adhukkapram automatic-a ovvoru 5 min-kum scan aagum. Onnum panna vendaam.
 - **GitHub timing:** Every 5 min-nu sonnaalum GitHub sila samayam 5–20 min late-a run pannum, rare-a skip-um pannum. Adhanaala signal konjam late-a varalaam. Stale signal (SL/TP1 already hit aanadhu) bot anuppaadhu. Innum accurate timing venumnaa, free **cron-job.org** use panni GitHub API moolama workflow-a trigger pannalaam.
 - **Data source:** GitHub servers US-la irukku, anga Binance Futures API block. So bot adhe pair-oda **Binance Spot** price-a use pannum. Futures price kitta thatta same dhaan, aana konjam difference irukkalaam. Message-la endha source-nu kaatum. Top 30 list-um spot volume vechu dhaan varum. Adhanaala list-la vara coin Binance Futures-la illama irukkalaam (rare). Signal vandhaa, andha coin Futures-la irukkaa-nu check pannitu trade pannunga. PEPE, SHIB maadhiri coins Futures-la `1000PEPEUSDT` maadhiri vera name-la irukkum; price-um 1000x-a irukkum.
 - **60-day rule:** Repo-la 60 naal activity illana GitHub schedule-a off pannidum. Bot ovvoru signal/heartbeat-kum `state.json` commit pannum, so idhu normally prachanai illa. Off aanaa Actions tab-la enable pannunga.
-- **Backtest:** Fees, slippage, funding include illa. Past result future-a guarantee pannaadhu.
+- **Backtest:** Fees include aagum, aana slippage, funding include illa. Past result future-a guarantee pannaadhu.
 
 ---
 

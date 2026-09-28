@@ -38,6 +38,11 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SYMBOLS: ${{ vars.SYMBOLS }}
           TOP_N: ${{ vars.TOP_N }}
+          MIN_SCORE: ${{ vars.MIN_SCORE }}
+          MIN_SL_PCT: ${{ vars.MIN_SL_PCT }}
+          FEE_PCT: ${{ vars.FEE_PCT }}
+          TIMEFRAME: ${{ vars.TIMEFRAME }}
+          HTF: ${{ vars.HTF }}
         run: |
           MODE="${{ github.event.inputs.mode }}"
           if [ "$MODE" = "test" ]; then python bot.py --test
