@@ -79,6 +79,15 @@ Variable add panninaa adutha run-la irundhu apply aagum. Delete panninaa default
 | `TIMEFRAME` | `1h` | Entry timeframe (`15m`, `1h`, `4h`) |
 | `HTF` | `4h` | Trend timeframe (`4h`, `1d`) |
 | `TRAIL_ATR` | `3` | Trailing stop distance = ATR × idhu |
+| `MARGIN_USD` | `5,8` | Neenga podra margin options ($, Isolated). Ovvonnukkum leverage kaatum |
+| `RISK_USD` | `1` | SL hit aana max loss ($). Unga total account-la ~1% vechukkonga |
+| `MAX_LEVERAGE` | `20` | Idha thaandi leverage suggest pannaadhu |
+
+### Position size & leverage
+Ovvoru signal-lum bot calculate pannum: `Leverage = RISK_USD ÷ (MARGIN_USD × SL%)`.
+Example: SL 2% → $5 margin-ku **10x**, $8 margin-ku **6x**. Rendulayum position ~$50, SL hit aana loss **~$1**.
+Liquidation eppavume SL-a vida kammiyaa 2 madangu dhooram irukkura maadhiri leverage cap aagum.
+Binance-la **Isolated** margin select panni, bot sonna leverage-a set pannunga.
 
 Code-la mattum irukkira settings (`bot.py` mela): `IMPULSE_ATR_MULT`, `ZONE_MAX_AGE`, `FALLBACK_SYMBOLS`.
 

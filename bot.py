@@ -65,6 +65,10 @@ MIN_SL_PCT = 1.0           # skip trades whose stop is closer than 1% (fees woul
 TRAIL_ATR = 3.0            # exit plan: trailing stop = 3 x ATR (best exit in the 1h backtest)
 SIMPLE_TP_R = 2.0          # simple alternative exit: fixed 2R target
 MAX_TRADE_DAYS = 30        # tracked trades still open after this are closed at market
+MARGIN_OPTIONS = [5.0, 8.0]  # margins you use per trade (Isolated); leverage is shown for each
+RISK_USD = 1.0             # max loss if SL is hit; leverage is picked per trade to match this
+MAX_LEVERAGE = 20          # never suggest more than this
+MMR_PCT = 0.5              # approx. maintenance margin %, for the liquidation estimate
 FEE_PCT = 0.10             # round-trip fee in % (Binance taker 0.05% in + 0.05% out).
                            # With limit (maker) entry + exit it is ~0.04%.
 CONFLUENCE_PAD_ATR = 0.25  # how close EMA / old S-R must be to the zone
@@ -96,6 +100,14 @@ MIN_SCORE = max(1, min(6, _env_num("MIN_SCORE", MIN_SCORE, int)))
 MIN_SL_PCT = _env_num("MIN_SL_PCT", MIN_SL_PCT)
 FEE_PCT = _env_num("FEE_PCT", FEE_PCT)
 TRAIL_ATR = _env_num("TRAIL_ATR", TRAIL_ATR)
+_m = [x.strip() for x in os.getenv("MARGIN_USD", "").split(",") if x.strip()]
+try:
+    MARGIN_OPTIONS = [float(x) for x in _m] or MARGIN_OPTIONS
+except ValueError:
+    print(f"Ignoring invalid MARGIN_USD={os.getenv('MARGIN_USD')!r}")
+MARGIN_USD = MARGIN_OPTIONS[0]
+RISK_USD = _env_num("RISK_USD", RISK_USD)
+MAX_LEVERAGE = max(1, _env_num("MAX_LEVERAGE", MAX_LEVERAGE, int))
 TIMEFRAME = os.getenv("TIMEFRAME", "").strip() or TIMEFRAME
 HTF = os.getenv("HTF", "").strip() or HTF
 
@@ -502,6 +514,22 @@ def pct(a, b):
     return f"{abs(b - a) / a * 100:.2f}%"
 
 
+def sizing(s, side, margin=None):
+    """Leverage for a fixed margin so that an SL hit loses about RISK_USD (never more).
+    Also capped so liquidation stays at least 2x further away than the SL."""
+    margin = margin or MARGIN_USD
+    slp = sl_pct(s)
+    want = RISK_USD / (margin * slp / 100)
+    safe = 100 / (2 * slp)                         # liquidation >= 2 x SL distance
+    lev = int(max(1, min(want, safe, MAX_LEVERAGE)))
+    pos = margin * lev
+    loss = pos * slp / 100
+    liq_dist = max(0.0, 100 / lev - MMR_PCT)       # % move to liquidation (isolated, approx.)
+    liq = s["entry"] * (1 - liq_dist / 100) if side == "LONG" else s["entry"] * (1 + liq_dist / 100)
+    return {"margin": margin, "lev": lev, "pos": pos, "loss": loss, "fee": pos * FEE_PCT / 100,
+            "liq": liq, "liq_dist": liq_dist, "capped": want > lev + 0.999}
+
+
 def signal_message(sym, side, s, source):
     grade = "A+" if s["score"] == 6 else "A" if s["score"] == 5 else "B"
     icon = "🟢" if side == "LONG" else "🔴"
@@ -513,6 +541,8 @@ def signal_message(sym, side, s, source):
     best_word = "highest high" if side == "LONG" else "lowest low"
     move = "−" if side == "LONG" else "+"
     checks = "\n".join(f"{'✅' if v else '❌'} {k}" for k, v in s["checks"].items())
+    opts = [sizing(s, side, m) for m in MARGIN_OPTIONS]
+    z = opts[0]
     return (
         f"{icon} <b>{side} {sym}</b>  ({TIMEFRAME})\n"
         + (f"⚠️ On Futures this is <b>{FUTURES_NAME[sym]}</b> (price ×1000)\n" if sym in FUTURES_NAME else "")
@@ -524,7 +554,14 @@ def signal_message(sym, side, s, source):
         f"After each {TIMEFRAME} candle close: SL = {best_word} {move} {fp(trail)} (never move it back).\n"
         f"🤖 I'll send you SL updates and the exit here.\n"
         f"Simple option: TP {SIMPLE_TP_R:g}R <code>{fp(tp_simple)}</code>\n\n"
-        f"💸 Fees ~{fee_r(s):.2f}R (at {FEE_PCT:.2f}% round trip). Limit orders cut this.\n\n"
+        f"💰 <b>Your trade (Isolated)</b>\n"
+        + "".join(f"${o['margin']:g} margin → <b>{o['lev']}x</b> (position ${o['pos']:.0f}, "
+                  f"SL loss −${o['loss']:.2f}, liq ≈ <code>{fp(o['liq'])}</code>)\n" for o in opts)
+        + f"Profit at {SIMPLE_TP_R:g}R ≈ +${z['loss'] * SIMPLE_TP_R:.2f} | SL is {sl_pct(s):.1f}% away\n"
+        + (f"ℹ️ Leverage capped for safety, so loss is below ${RISK_USD:g}.\n" if z["capped"] else "")
+        + (f"⚠️ SL is wide: even at 1x the loss is above ${RISK_USD:g}. Use less margin or skip.\n"
+           if z["loss"] > RISK_USD * 1.01 else "")
+        + f"💸 Fees ~${z['fee']:.2f} ({fee_r(s):.2f}R). Limit orders cut this.\n\n"
         f"{zone} zone: {fp(s['bot'])} – {fp(s['top'])} ({s['ztype']})\n"
         f"{checks}\n"
         f"✅ Trend confirmed (EMA{EMA_LEN} {TIMEFRAME} + {HTF})\n\n"
@@ -572,6 +609,7 @@ def open_trade(st, key, sym, side, s, source):
         "risk": risk, "trail": TRAIL_ATR * s["atr"], "slp": sl_pct(s), "fee_r": fee_r(s),
         "tp_simple": (s["entry"] + SIMPLE_TP_R * risk) if side == "LONG" else (s["entry"] - SIMPLE_TP_R * risk),
         "simple_r": None, "opened": s["time"], "last_ct": s["time"], "notified_stop": s["sl"],
+        "usd_r": sizing(s, side)["loss"],           # $ per 1R with the suggested leverage
     }
 
 
@@ -626,11 +664,13 @@ def manage_trades(st, cache):
         if status == "closed":
             simple = tr["simple_r"] if tr["simple_r"] is not None else max(-1.0, min(SIMPLE_TP_R, r))
             net = r - tr["fee_r"]
+            usd = net * tr.get("usd_r", RISK_USD)
             tg(f"🏁 {name} closed at <code>{fp(exit_px)}</code>\n"
-               f"Trailing result: <b>{r:+.2f}R</b> (after fees ~{net:+.2f}R)\n"
+               f"Trailing result: <b>{r:+.2f}R</b> (after fees ~{net:+.2f}R ≈ <b>{'+' if usd >= 0 else '−'}${abs(usd):.2f}</b>)\n"
                f"Simple {SIMPLE_TP_R:g}R plan would be: {simple:+.2f}R")
             st["closed"].append({"sym": tr["sym"], "side": tr["side"], "tf": tr["tf"], "r": round(r, 3),
                                  "net": round(net, 3), "simple": round(simple - tr["fee_r"], 3),
+                                 "usd": round(net * tr.get("usd_r", RISK_USD), 2),
                                  "closed": int(time.time())})
             del st["open"][key]
             continue
@@ -654,7 +694,9 @@ def paper_stats(st, days=None):
     if not rows:
         return "no closed trades yet"
     w = sum(1 for c in rows if c["net"] > 0)
-    return (f"{len(rows)} trades, win {w / len(rows) * 100:.0f}%, trailing {sum(c['net'] for c in rows):+.1f}R, "
+    usd = sum(c.get("usd", c["net"] * RISK_USD) for c in rows)
+    return (f"{len(rows)} trades, win {w / len(rows) * 100:.0f}%, trailing {sum(c['net'] for c in rows):+.1f}R "
+            f"({'+' if usd >= 0 else '−'}${abs(usd):.2f}), "
             f"simple {SIMPLE_TP_R:g}R {sum(c['simple'] for c in rows):+.1f}R (after fees)")
 
 
@@ -848,7 +890,8 @@ def main():
                 f"{', '.join(f'{x} (={FUTURES_NAME[x]})' if x in FUTURES_NAME else x for x in SYMBOLS)}\n"
                 f"Timeframe: {TIMEFRAME} (trend: {HTF}), min grade: {MIN_SCORE}/6\n"
                 f"Min SL: {MIN_SL_PCT}%, fees assumed: {FEE_PCT:.2f}%\n"
-                f"Exit plan: trailing stop {TRAIL_ATR:g}×ATR (simple option {SIMPLE_TP_R:g}R)")
+                f"Exit plan: trailing stop {TRAIL_ATR:g}×ATR (simple option {SIMPLE_TP_R:g}R)\n"
+                f"Sizing: ${' / $'.join(f'{m:g}' for m in MARGIN_OPTIONS)} margin, max loss ${RISK_USD:g}/trade, leverage ≤{MAX_LEVERAGE}x")
         sys.exit(0 if ok else 1)
     if args.backtest:
         run_backtest(args.candles)
