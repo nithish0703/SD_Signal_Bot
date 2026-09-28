@@ -7,14 +7,21 @@
 
 ## Bot enna pannum
 
-Ovvoru 5 nimishathukkum, andha nerathula volume-la top 30 USDT coins-a automatic-a edukkum (stablecoins, UP/DOWN tokens skip). Apram 15m chart + 1h trend-la check pannum:
+Ovvoru 5 nimishathukkum, andha nerathula volume-la top 30 USDT coins-a automatic-a edukkum (stablecoins, UP/DOWN tokens skip). Apram **1h chart + 4h trend**-la check pannum (backtest-la 1h, 15m-a vida better; fees paadhippu kammi):
 
 1. **Step 1:** Base candle-ku apram 3+ big candles impulse (≥ 2 ATR) + Fair Value Gap → Demand zone (LONG) / Supply zone (SHORT)
 2. **Step 2:** Trend confirm: 15m EMA50 correct direction-la pogudhu + 1h price EMA50-ku correct side-la
 3. **Step 3:** Price zone-a first time tap pannanum, slow momentum, zone-ku veliya close aagakoodaadhu, apram confirmation candle
 4. **6 keys score:** Fresh zone, Close/wick, Confluence (EMA / old S-R), Lowest demand, Discount (<50% fib), Break of structure
 
-Score **5/6 (A) or 6/6 (A+)** vandhaa mattum signal varum: Entry, Stop Loss, TP1 (1R), TP2 (1.5R), TP3.
+Score **5/6 (A) or 6/6 (A+)** vandhaa mattum signal varum. Signal-la: Entry, Stop Loss, **exit plan (trailing stop 3×ATR)**, simple option TP 2R.
+
+### Trade tracking (pudhusu)
+Signal anuppina apram, bot adha track pannum:
+- 🔁 **SL update:** Price correct direction-la poi SL move panna vendiya neram vandhaa, "move SL to X"-nu message varum.
+- 🏁 **Exit:** Trailing stop hit aanadhum, result R-la varum. Simple 2R plan-la evvalavu vandhirukkum-nu-um kaatum.
+- 📒 **Paper results:** Dhinamum kaalai 9 mani message-la, last 30 days + all-time results (fees kazhichu) varum.
+  Real money podradhukku munnaadi, idha 1–2 maasam paathu backtest-oda match aagudhaa-nu confirm pannunga.
 Daily kaalai 9 mani-ku "bot running" message varum, so bot uyiroda irukkaa-nu theriyum.
 
 ---
@@ -67,10 +74,11 @@ Variable add panninaa adutha run-la irundhu apply aagum. Delete panninaa default
 | `TOP_N` | `30` | Volume-la top evvalavu coins scan pannanum |
 | `SYMBOLS` | (auto) | `BTCUSDT,ETHUSDT` maadhiri kudutha, indha coins mattum dhaan |
 | `MIN_SCORE` | `5` | `6` = A+ mattum (kammi signals, strong), `4` = adhiga signals |
-| `MIN_SL_PCT` | `0.5` | SL idha vida close-a irundha trade skip (fees profit-a saapidum) |
+| `MIN_SL_PCT` | `1` | SL idha vida close-a irundha trade skip (fees profit-a saapidum) |
 | `FEE_PCT` | `0.10` | Round-trip fee %. Market order = `0.10`, limit order = `0.04` |
-| `TIMEFRAME` | `15m` | Entry timeframe (`5m`, `15m`, `1h`) |
-| `HTF` | `1h` | Trend timeframe (`1h`, `4h`) |
+| `TIMEFRAME` | `1h` | Entry timeframe (`15m`, `1h`, `4h`) |
+| `HTF` | `4h` | Trend timeframe (`4h`, `1d`) |
+| `TRAIL_ATR` | `3` | Trailing stop distance = ATR × idhu |
 
 Code-la mattum irukkira settings (`bot.py` mela): `IMPULSE_ATR_MULT`, `ZONE_MAX_AGE`, `FALLBACK_SYMBOLS`.
 
@@ -78,15 +86,7 @@ Code-la mattum irukkira settings (`bot.py` mela): `IMPULSE_ATR_MULT`, `ZONE_MAX_
 
 Ovvoru signal-lum `💸 Fees ~0.16R` maadhiri kaatum: andha trade-la fees unga risk-la evvalavu-nu.
 Backtest ippo fees-a kazhichu **net result** kaatum, market order vs limit order rendaiyum compare panni.
-Actions → backtest run → summary-la full table irukkum. Telegram-la current settings result + best setting varum.
-
----|---|---|
-| `TOP_N` | `30` | Volume-la top evvalavu coins scan pannanum |
-| `FALLBACK_SYMBOLS` | 30 big coins | Top list fetch aagalana idhu use aagum |
-| `TIMEFRAME` | `15m` | Entry timeframe (`5m`, `15m`, `1h`) |
-| `HTF` | `1h` | Trend timeframe (`1h`, `4h`) |
-| `MIN_SCORE` | `5` | `6` = A+ mattum (kammi signals, strong), `4` = adhiga signals |
-| `IMPULSE_ATR_MULT` | `2.0` | Adhigama vechaa strong impulse mattum |
+Actions → backtest run → summary-la 8 exit methods (fixed R, ATR TP, ATR trailing) compare aagum. Telegram-la top 3 exits varum.
 
 ---
 

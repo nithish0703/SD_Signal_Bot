@@ -44,8 +44,8 @@ FALLBACK_SYMBOLS = [
 EXCLUDE_BASES = {"USDC", "FDUSD", "TUSD", "BUSD", "USDP", "DAI", "USDE", "USD1", "RLUSD",
                  "EUR", "EURI", "AEUR", "XUSD", "PAXG", "WBTC", "WBETH", "BFUSD", "USDS"}
 SYMBOLS = []               # filled at runtime by resolve_symbols()
-TIMEFRAME = "15m"          # entry timeframe
-HTF = "1h"                 # higher timeframe for trend confirmation (step 2)
+TIMEFRAME = "1h"           # entry timeframe (1h beat 15m in backtest: fees hurt less)
+HTF = "4h"                 # higher timeframe for trend confirmation (step 2)
 CANDLES = 500              # candles fetched per scan
 
 EMA_LEN = 50
@@ -60,7 +60,10 @@ MAX_TAP_BODY_ATR = 1.5     # slow momentum: no huge candle crashing into the zon
 SIGNAL_LOOKBACK = 3        # only signal if confirmation candle is among last 3 closed candles
 MIN_SCORE = 5              # 6 keys score needed to send a signal (6 = A+, 5 = A)
 SL_BUFFER_ATR = 0.1        # stop loss buffer below/above the zone
-MIN_SL_PCT = 0.5           # skip trades whose stop is closer than 0.5% (fees would eat the profit)
+MIN_SL_PCT = 1.0           # skip trades whose stop is closer than 1% (fees would eat the profit)
+TRAIL_ATR = 3.0            # exit plan: trailing stop = 3 x ATR (best exit in the 1h backtest)
+SIMPLE_TP_R = 2.0          # simple alternative exit: fixed 2R target
+MAX_TRADE_DAYS = 30        # tracked trades still open after this are closed at market
 FEE_PCT = 0.10             # round-trip fee in % (Binance taker 0.05% in + 0.05% out).
                            # With limit (maker) entry + exit it is ~0.04%.
 CONFLUENCE_PAD_ATR = 0.25  # how close EMA / old S-R must be to the zone
@@ -91,6 +94,7 @@ def _env_num(name, default, cast=float):
 MIN_SCORE = max(1, min(6, _env_num("MIN_SCORE", MIN_SCORE, int)))
 MIN_SL_PCT = _env_num("MIN_SL_PCT", MIN_SL_PCT)
 FEE_PCT = _env_num("FEE_PCT", FEE_PCT)
+TRAIL_ATR = _env_num("TRAIL_ATR", TRAIL_ATR)
 TIMEFRAME = os.getenv("TIMEFRAME", "").strip() or TIMEFRAME
 HTF = os.getenv("HTF", "").strip() or HTF
 
@@ -429,17 +433,23 @@ def signal_message(sym, side, s, source):
     icon = "🟢" if side == "LONG" else "🔴"
     zone = "Demand" if side == "LONG" else "Supply"
     t = datetime.fromtimestamp(s["time"] / 1000, IST).strftime("%d %b %I:%M %p IST")
-    rr3 = abs(s["tp3"] - s["entry"]) / abs(s["entry"] - s["sl"])
+    risk = abs(s["entry"] - s["sl"])
+    tp_simple = s["entry"] + SIMPLE_TP_R * risk if side == "LONG" else s["entry"] - SIMPLE_TP_R * risk
+    trail = TRAIL_ATR * s["atr"]
+    best_word = "highest high" if side == "LONG" else "lowest low"
+    move = "−" if side == "LONG" else "+"
     checks = "\n".join(f"{'✅' if v else '❌'} {k}" for k, v in s["checks"].items())
     return (
         f"{icon} <b>{side} {sym}</b>  ({TIMEFRAME})\n"
         f"Grade: <b>{grade}</b> ({s['score']}/6)\n\n"
         f"Entry: <code>{fp(s['entry'])}</code>\n"
-        f"Stop Loss: <code>{fp(s['sl'])}</code> ({pct(s['entry'], s['sl'])})\n"
-        f"TP1 (1R): <code>{fp(s['tp1'])}</code>\n"
-        f"TP2 (1.5R): <code>{fp(s['tp2'])}</code>\n"
-        f"TP3 ({rr3:.1f}R): <code>{fp(s['tp3'])}</code>\n"
-        f"💸 Fees ~{fee_r(s):.2f}R (at {FEE_PCT:.2f}% round trip). Use limit orders to cut this.\n\n"
+        f"Stop Loss: <code>{fp(s['sl'])}</code> ({pct(s['entry'], s['sl'])})\n\n"
+        f"🎯 <b>Exit plan: trailing stop {TRAIL_ATR:g}×ATR</b>\n"
+        f"Trail distance: <code>{fp(trail)}</code>\n"
+        f"After each {TIMEFRAME} candle close: SL = {best_word} {move} {fp(trail)} (never move it back).\n"
+        f"🤖 I'll send you SL updates and the exit here.\n"
+        f"Simple option: TP {SIMPLE_TP_R:g}R <code>{fp(tp_simple)}</code>\n\n"
+        f"💸 Fees ~{fee_r(s):.2f}R (at {FEE_PCT:.2f}% round trip). Limit orders cut this.\n\n"
         f"{zone} zone: {fp(s['bot'])} – {fp(s['top'])} ({s['ztype']})\n"
         f"{checks}\n"
         f"✅ Trend confirmed (EMA{EMA_LEN} {TIMEFRAME} + {HTF})\n\n"
@@ -458,23 +468,128 @@ def load_state():
     st.setdefault("sent", {})
     st.setdefault("last_heartbeat", "")
     st.setdefault("last_error_alert", 0)
+    st.setdefault("open", {})      # signals being tracked (trailing stop)
+    st.setdefault("closed", [])    # finished paper trades
     return st
 
 
 def save_state(st):
     cutoff = time.time() - 14 * 86400
     st["sent"] = {k: v for k, v in st["sent"].items() if v >= cutoff}
+    st["closed"] = st["closed"][-300:]
     with open(STATE_FILE, "w") as f:
         json.dump(st, f, indent=1, sort_keys=True)
 
 # ============================ MODES ============================
 
+# ============================ TRADE TRACKING ============================
+
+def _px(v, side):
+    """Mirror a price for SHORT so one piece of code handles both sides."""
+    return v if side == "LONG" else -v
+
+
+def open_trade(st, key, sym, side, s, source):
+    risk = abs(s["entry"] - s["sl"])
+    st["open"][key] = {
+        "sym": sym, "side": side, "tf": TIMEFRAME, "source": source,
+        "entry": s["entry"], "sl": s["sl"], "stop": s["sl"], "best": s["entry"],
+        "risk": risk, "trail": TRAIL_ATR * s["atr"], "slp": sl_pct(s), "fee_r": fee_r(s),
+        "tp_simple": (s["entry"] + SIMPLE_TP_R * risk) if side == "LONG" else (s["entry"] - SIMPLE_TP_R * risk),
+        "simple_r": None, "opened": s["time"], "last_ct": s["time"], "notified_stop": s["sl"],
+    }
+
+
+def update_trade(tr, candles):
+    """Walk new closed candles. Returns ('closed', exit_price, R) or ('open', None, None)."""
+    side = tr["side"]
+    E, SL, TP = _px(tr["entry"], side), _px(tr["sl"], side), _px(tr["tp_simple"], side)
+    stop, best = _px(tr["stop"], side), _px(tr["best"], side)
+    for x in candles:
+        if x["ct"] <= tr["last_ct"]:
+            continue
+        if side == "LONG":
+            hi, lo, op = x["h"], x["l"], x["o"]
+        else:
+            hi, lo, op = -x["l"], -x["h"], -x["o"]
+        if tr["simple_r"] is None:                    # the simple fixed-2R version
+            if lo <= SL:
+                tr["simple_r"] = -1.0
+            elif hi >= TP:
+                tr["simple_r"] = SIMPLE_TP_R
+        tr["last_ct"] = x["ct"]
+        if lo <= stop:                                # trailing stop hit
+            exit_px = min(op, stop)
+            tr["stop"], tr["best"] = _px(stop, side), _px(best, side)
+            return "closed", _px(exit_px, side), (exit_px - E) / tr["risk"]
+        best = max(best, hi)
+        stop = max(stop, best - tr["trail"])
+        tr["stop"], tr["best"] = _px(stop, side), _px(best, side)
+    if candles and time.time() * 1000 - tr["opened"] > MAX_TRADE_DAYS * 86400000:
+        last = _px(candles[-1]["c"], side)
+        return "closed", candles[-1]["c"], (last - E) / tr["risk"]
+    return "open", None, None
+
+
+def locked_r(tr):
+    return (_px(tr["stop"], tr["side"]) - _px(tr["entry"], tr["side"])) / tr["risk"]
+
+
+def manage_trades(st, cache):
+    """Send SL updates / exits for tracked signals and record paper results."""
+    for key, tr in list(st["open"].items()):
+        ck = (tr["sym"], tr["tf"])
+        try:
+            if ck not in cache:
+                cache[ck] = fetch_klines(tr["sym"], tr["tf"], CANDLES, source=tr.get("source"))[0]
+            status, exit_px, r = update_trade(tr, cache[ck])
+        except Exception as e:
+            print("track error", tr["sym"], e)
+            continue
+        icon = "🟢" if tr["side"] == "LONG" else "🔴"
+        name = f"{icon} <b>{tr['side']} {tr['sym']}</b> ({tr['tf']})"
+        if status == "closed":
+            simple = tr["simple_r"] if tr["simple_r"] is not None else max(-1.0, min(SIMPLE_TP_R, r))
+            net = r - tr["fee_r"]
+            tg(f"🏁 {name} closed at <code>{fp(exit_px)}</code>\n"
+               f"Trailing result: <b>{r:+.2f}R</b> (after fees ~{net:+.2f}R)\n"
+               f"Simple {SIMPLE_TP_R:g}R plan would be: {simple:+.2f}R")
+            st["closed"].append({"sym": tr["sym"], "side": tr["side"], "tf": tr["tf"], "r": round(r, 3),
+                                 "net": round(net, 3), "simple": round(simple - tr["fee_r"], 3),
+                                 "closed": int(time.time())})
+            del st["open"][key]
+            continue
+        moved = (_px(tr["stop"], tr["side"]) - _px(tr["notified_stop"], tr["side"])) / tr["risk"]
+        if moved >= 0.25:                             # only ping for meaningful moves
+            lr = locked_r(tr)
+            if abs(lr) < 0.01:
+                lock = "breakeven, no risk left"
+            elif lr > 0:
+                lock = f"locks {lr:+.2f}R profit"
+            else:
+                lock = f"risk now {-lr:.2f}R"
+            if tg(f"🔁 {name}: move SL to <code>{fp(tr['stop'])}</code> ({lock})"):
+                tr["notified_stop"] = tr["stop"]
+
+
+def paper_stats(st, days=None):
+    rows = st["closed"]
+    if days:
+        rows = [c for c in rows if c["closed"] > time.time() - days * 86400]
+    if not rows:
+        return "no closed trades yet"
+    w = sum(1 for c in rows if c["net"] > 0)
+    return (f"{len(rows)} trades, win {w / len(rows) * 100:.0f}%, trailing {sum(c['net'] for c in rows):+.1f}R, "
+            f"simple {SIMPLE_TP_R:g}R {sum(c['simple'] for c in rows):+.1f}R (after fees)")
+
+
 def run_scan():
     st = load_state()
-    sent, errors = 0, []
+    sent, errors, cache = 0, [], {}
     for sym in SYMBOLS:
         try:
             C, src = fetch_klines(sym, TIMEFRAME, CANDLES)
+            cache[(sym, TIMEFRAME)] = C
             H, _ = fetch_klines(sym, HTF, CANDLES, source=src)
             for side in ("LONG", "SHORT"):
                 for s in live_setups(C, H, side):
@@ -485,6 +600,7 @@ def run_scan():
                         continue
                     if tg(signal_message(sym, side, s, src)):
                         st["sent"][key] = int(time.time())
+                        open_trade(st, key, sym, side, s, src)
                         sent += 1
             print(f"{sym}: ok ({src}, {len(C)} candles)")
         except Exception as e:
@@ -492,13 +608,17 @@ def run_scan():
             print("ERROR", e)
         time.sleep(0.15)
 
+    manage_trades(st, cache)
+
     now = datetime.now(IST)
     today = now.strftime("%Y-%m-%d")
     if now.hour >= HEARTBEAT_HOUR_IST and st["last_heartbeat"] != today:
         msg = (f"✅ <b>S&D bot running</b>\nScanning {len(SYMBOLS)} coins on {TIMEFRAME} (+{HTF} trend)\n"
-               f"Signals in last 24h: {sum(1 for v in st['sent'].values() if v > time.time() - 86400)}")
+               f"Signals in last 24h: {sum(1 for v in st['sent'].values() if v > time.time() - 86400)}\n"
+               f"Open tracked trades: {len(st['open'])}\n\n"
+               f"📒 <b>Paper results</b>\nLast 30 days: {paper_stats(st, 30)}\nAll time: {paper_stats(st)}")
         if errors:
-            msg += f"\n⚠️ Errors this run: {len(errors)}\n" + "\n".join(errors[:3])
+            msg += f"\n\n⚠️ Errors this run: {len(errors)}\n" + "\n".join(errors[:3])
         if tg(msg):
             st["last_heartbeat"] = today
     if errors and len(errors) == len(SYMBOLS) and time.time() - st["last_error_alert"] > 6 * 3600:
@@ -506,7 +626,7 @@ def run_scan():
             st["last_error_alert"] = int(time.time())
 
     save_state(st)
-    print(f"Done. New signals: {sent}. Errors: {len(errors)}")
+    print(f"Done. New signals: {sent}. Open trades: {len(st['open'])}. Errors: {len(errors)}")
 
 
 def simulate(C, s, side, r_target):
@@ -651,7 +771,8 @@ def main():
     if args.test:
         ok = tg(f"👋 <b>S&D bot connected!</b>\nCoins: {', '.join(SYMBOLS)}\n"
                 f"Timeframe: {TIMEFRAME} (trend: {HTF}), min grade: {MIN_SCORE}/6\n"
-                f"Min SL: {MIN_SL_PCT}%, fees assumed: {FEE_PCT:.2f}%")
+                f"Min SL: {MIN_SL_PCT}%, fees assumed: {FEE_PCT:.2f}%\n"
+                f"Exit plan: trailing stop {TRAIL_ATR:g}×ATR (simple option {SIMPLE_TP_R:g}R)")
         sys.exit(0 if ok else 1)
     if args.backtest:
         run_backtest(args.candles)
