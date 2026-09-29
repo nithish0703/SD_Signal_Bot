@@ -1775,6 +1775,49 @@ def money(x):
     return f"{'+' if x >= 0 else '−'}${abs(x):.2f}"
 
 
+def send_trade_log(log, balance, exit_name, days):
+    """Per-trade P&L list (live exit), in close order, with the running balance."""
+    if not log:
+        tg("📋 No trades in this period.")
+        return
+    closed = sorted([t for t in log if t["why"] != "open"], key=lambda t: t["close"])
+    still = [t for t in log if t["why"] == "open"]
+    bal, rows, lines = balance, [], []
+    for i, t in enumerate(closed + still, 1):
+        if t["why"] != "open":
+            bal += t["pnl"]
+        when = datetime.fromtimestamp(t["open"] / 1000, IST).strftime("%d %b %H:%M")
+        shut = datetime.fromtimestamp(t["close"] / 1000, IST).strftime("%d %b %H:%M") if t["close"] else "open"
+        icon = "🟢" if t["side"] == "LONG" else "🔴"
+        tag = {"TP": "🎯TP", "SL": "🛑SL", "LIQ": "💀LIQ", "open": "⏳open"}[t["why"]]
+        rows.append(f"| {i} | {when} | {shut} | {t['sym']} | {t['side']} | {t['lev']}x | {fp(t['entry'])} | {fp(t['exit'])} "
+                    f"| {tag} | {money(t['pnl'])} | ${bal:.2f} |")
+        lines.append(f"{i}. {icon} {t['sym']} {t['lev']}x | {when} → {shut[:6]} | {tag} {money(t['pnl'])} → ${bal:.2f}")
+    wins = [t for t in closed if t["pnl"] > 0]
+    losses = [t for t in closed if t["pnl"] <= 0]
+    total = sum(t["pnl"] for t in closed)
+    unreal = sum(t["pnl"] for t in still)
+    summary = (f"Closed: {len(closed)} trades ({len(wins)} win / {len(losses)} loss), "
+               f"win profit {money(sum(t['pnl'] for t in wins))}, loss {money(sum(t['pnl'] for t in losses))}\n"
+               f"Net closed P&L: {money(total)} → balance ${balance + total:.2f} ({total / balance * 100:+.1f}%)"
+               + (f"\nStill open: {len(still)} ({money(unreal)} unrealised)" if still else ""))
+    md = (f"### Trade log – {exit_name}, last {days} days\n\n"
+          "Sorted by close time; balance = $ after each trade closes.\n\n"
+          "| # | Opened (IST) | Closed (IST) | Coin | Side | Lev | Entry | Exit | Result | P&L | Balance |\n"
+          "|---|---|---|---|---|---|---|---|---|---|---|\n" + "\n".join(rows) + "\n\n" + summary.replace("\n", "  \n") + "\n")
+    print(md)
+    if os.getenv("GITHUB_STEP_SUMMARY"):
+        with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
+            f.write("\n" + md)
+    chunk = f"📋 <b>Trade log</b> ({exit_name}, last {days} days, ${balance:g} start)\n"
+    for ln in lines:
+        if len(chunk) + len(ln) > 3500:                     # Telegram message limit
+            tg(chunk)
+            chunk = ""
+        chunk += ln + "\n"
+    tg(chunk + "\n<b>" + summary.replace("\n", "</b>\n<b>", 1) + "</b>")
+
+
 def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy=None):
     """Simulate a real account, one position per coin, a trade only opens if free balance >= its margin.
     mode 'risk' : every trade loses ~`risk` $ at SL (leverage picked per trade, like the live signal).
@@ -1830,7 +1873,8 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                     px, idx = _exit_detail(C, s, side, kind, v, stop)
                     res[lbl] = (px, C[idx]["ct"] if idx is not None else None)
                 cands.append({"sym": sym, "side": side, "t": s["time"], "entry": s["entry"], "res": res,
-                              "liq": liquidates, "liq_px": liq_px, "pos": c_pos, "lev": c_lev})
+                              "liq": liquidates, "liq_px": liq_px, "pos": c_pos, "lev": c_lev,
+                              "sl": s["sl"], "tp": s.get("tp")})
         print(f"{sym}: {sum(1 for c in cands if c['sym'] == sym)} setups")
         time.sleep(0.1)
     cands.sort(key=lambda c: c["t"])
@@ -1841,8 +1885,9 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
         move = (px - c["entry"]) / c["entry"] if c["side"] == "LONG" else (c["entry"] - px) / c["entry"]
         return max(-margin, c["pos"] * move) - c["pos"] * FEE_PCT / 100
 
-    results = []
+    results, trade_log = [], []
     for lbl, _, _ in exits:
+        log_this = lbl == exits[0][0]                              # the live exit: keep a per-trade log
         free, open_ = balance, {}                                  # open_: sym -> (close_t, margin+pnl)
         taken = skipped_cash = skipped_coin = wins = liqs = 0
         pnls, fees = [], 0.0
@@ -1881,6 +1926,21 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 pnls.append(("closed", p))
                 wins += p > 0
                 liqs += c["liq"] and p <= -margin * 0.99
+            if log_this:
+                tol = abs(c["entry"]) * 1e-6
+                if px is None:
+                    why = "open"
+                elif c["liq"] and p <= -margin * 0.99:
+                    why = "LIQ"
+                elif c.get("tp") is not None and abs(px - c["tp"]) <= tol:
+                    why = "TP"
+                elif abs(px - c["sl"]) <= tol or p < 0:
+                    why = "SL"
+                else:
+                    why = "TP"
+                trade_log.append({"sym": c["sym"], "side": c["side"], "open": c["t"], "close": ct,
+                                  "entry": c["entry"], "exit": px if px is not None else last_close[c["sym"]],
+                                  "lev": c["lev"], "pnl": p, "why": why})
             fees += c["pos"] * FEE_PCT / 100
             max_open = max(max_open, len(open_))
         settle(1e20)
@@ -1936,6 +1996,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 + (f", {r['liqs']} liquidated" if r["liqs"] else "") + "\n")
     msg += "\nFunding & slippage not included. Full table: GitHub → Actions → run summary."
     tg(msg)
+    send_trade_log(trade_log, balance, exits[0][0], days)
 
 
 def main():
