@@ -829,6 +829,9 @@ def tg(text):
     if not TG_TOKEN or not TG_CHATS:
         print("[telegram not configured]\n" + text)
         return False
+    branch = os.getenv("GITHUB_REF_NAME", "")
+    if branch and branch != "main":                      # test runs from dev etc. are labelled
+        text = f"🧪 <b>[{branch.upper()}]</b> " + text
     ok = True
     for chat in TG_CHATS:
         try:

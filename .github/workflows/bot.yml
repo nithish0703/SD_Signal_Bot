@@ -43,7 +43,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: sd-signal-bot
+  group: sd-signal-bot-${{ github.ref_name }}   # dev test runs never block the live bot on main
   cancel-in-progress: false
 
 jobs:
@@ -127,11 +127,11 @@ jobs:
           fi
 
       - name: Save state (stops duplicate signals)
-        if: github.event.inputs.mode == '' || github.event.inputs.mode == 'scan' || github.event.inputs.mode == 'smc'
+        if: (github.event.inputs.mode == '' || github.event.inputs.mode == 'scan' || github.event.inputs.mode == 'smc') && (github.ref_name == 'main' || github.event.inputs.mode == 'smc')
         run: |
           git config user.name "sd-signal-bot"
           git config user.email "sd-signal-bot@users.noreply.github.com"
-          git add state.json
+          if [ "${{ github.ref_name }}" = "main" ]; then git add state.json; fi   # live paper trades only on main
           if [ -f smc_filters.json ]; then git add smc_filters.json; fi
           if [ -f coin_universe.json ]; then git add coin_universe.json; fi
           if ! git diff --cached --quiet; then
