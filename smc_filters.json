@@ -1,0 +1,27 @@
+{
+ "filters": {
+  "SMC_BTC": 1
+ },
+ "updated": "2026-09-29 04:05 UTC",
+ "exit": "Prev high/low (liquidity)",
+ "baseline": {
+  "train": [
+   358,
+   0.169
+  ],
+  "test": [
+   94,
+   -0.007
+  ]
+ },
+ "with_filters": {
+  "train": [
+   195,
+   0.215
+  ],
+  "test": [
+   52,
+   0.484
+  ]
+ }
+}
