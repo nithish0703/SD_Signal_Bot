@@ -1740,6 +1740,11 @@ def _smc_long(C, H, entry_mode, pending=False):
         q["sweep_rej"] = rec == s                                        # sweep candle itself closed back above
         q["mss_vol"] = (vol[m] / (sum(vol[m - 20:m]) / 20)) if m >= 20 and sum(vol[m - 20:m]) > 0 else 0.0
         q["mss_bars"] = m - s                                            # candles from sweep to MSS
+        sg = max(m, fv + 1)                                              # signal candle (setup known)
+        q["adx_sig"] = ADX[sg] or 0.0
+        q["chop_sig"] = CH[sg] if CH[sg] is not None else 100.0
+        k5 = bisect.bisect_right(hct, C[sg]["ct"]) - 1
+        q["trend_sig"] = k5 >= 0 and he[k5] is not None and hc[k5] > he[k5]
         k4 = bisect.bisect_right(hct, C[s]["ct"]) - 1
         ha = HA[k4] if k4 >= 0 and HA[k4] else a
         q["htf_poi"] = any(abs(v2 - sweep_low) <= 0.5 * ha for i2, v2 in hpl
@@ -1850,6 +1855,11 @@ SMC_QUALITY = [
     ("Anti-fake: MSS volume ≥1.5× average", "SMC_MSS_VOL", 1.5, lambda t, v: t.get("mss_vol", 9) >= v),
     ("Anti-fake: MSS within 6 candles of sweep", "SMC_MSS_FAST", 6, lambda t, v: t.get("mss_bars", 0) <= v),
     ("Loss-fix: target ≥1R (no tiny TPs)", "SMC_TGT_1R", 1.0, lambda t, v: t["tgt_r"] >= v),
+    # regime / trend candidates (choppy-market filter, 4h alignment)
+    ("Regime: 1h ADX ≥20 (not choppy)", "SMC_ADX", 20, lambda t, v: t.get("adx_sig", 99) >= v),
+    ("Regime: 1h CHOP ≤61.8 (not ranging)", "SMC_CHOP", 61.8, lambda t, v: t.get("chop_sig", 0) <= v),
+    ("Trend: coin 4h trend agrees (long up / short down)", "SMC_TREND", 1, lambda t, v: t.get("trend_sig", True)),
+    ("Anti-fake: MSS within 4 candles of sweep", "SMC_MSS_FAST4", 4, lambda t, v: t.get("mss_bars", 0) <= v),
 ]
 BTC_VARS = ("SMC_BTC", "SMC_BTC_ADX", "SMC_BTC_STABLE")
 
@@ -2039,6 +2049,13 @@ def validate_quality(trades):
     if not combo:
         cur = (bn, bavg, btn, btavg)
 
+    extra = []
+    for lbl, var, val, fn in SMC_QUALITY:
+        if var in combo:
+            continue
+        r = ev(apply(dict(combo, **{var: val})))
+        better = r[0] >= 60 and r[2] >= 20 and r[1] > cur[1] and r[3] > cur[3]
+        extra.append(f"| {lbl} | {r[0]} / {r[1]:+.2f}R | {r[2]} / {r[3]:+.2f}R | {'⬆️ both' if better else ''} |")
     be_key = "Liquidity + breakeven at 1R"
     bev = ev(apply(combo), be_key)
     be_on = bev[0] >= 60 and bev[2] >= 20 and bev[1] >= cur[1] + 0.01 and bev[3] > cur[3] and bev[3] > 0
@@ -2058,13 +2075,19 @@ def validate_quality(trades):
              f"| **Baseline (no quality filter)** | {bn} / {bavg:+.2f}R | {btn} / {btavg:+.2f}R | | |\n"
              + "\n".join(rows) +
              f"\n\n**Applied to live signals:** {names} → train {cur[0]} / {cur[1]:+.2f}R, test {cur[2]} / {cur[3]:+.2f}R\n"
-             f"\n**Loss control:** {be_line}\n")
+             f"\n**Loss control:** {be_line}\n"
+             f"\n### Extra filter ON TOP of the applied ones (info only, not auto-applied)\n\n"
+             f"Now: train {cur[0]} / {cur[1]:+.2f}R, test {cur[2]} / {cur[3]:+.2f}R. "
+             "⬆️ = better in both periods (still small samples – treat as a hint).\n\n"
+             "| Add filter | Train | Test | |\n|---|---|---|---|\n" + "\n".join(extra) + "\n")
     msg = (f"\n<b>Quality filters (train → last 60 days test)</b>\n"
            f"Baseline: train {bavg:+.2f}R ({bn}), test {btavg:+.2f}R ({btn})\n"
            + ("Passed: " + ", ".join(p[1] for p in passed) if passed else "Passed: none") + "\n"
            f"✅ <b>Applied to live:</b> {names}\n"
            f"With them: train {cur[1]:+.2f}R ({cur[0]}), test {cur[3]:+.2f}R ({cur[2]})\n"
-           f"🛡 {be_line}")
+           f"🛡 {be_line}\n"
+           + (("➕ Extra filter better in both periods: " + ", ".join(e.split(" | ")[0].lstrip("| ") for e in extra if "⬆️" in e))
+              if any("⬆️" in e for e in extra) else "➕ No extra filter improves both periods"))
     return table, msg
 
 
