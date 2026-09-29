@@ -96,6 +96,14 @@ jobs:
           SMC_SHORT_TREND: ${{ vars.SMC_SHORT_TREND }}
           SMC_COOLDOWN: ${{ vars.SMC_COOLDOWN }}
           SMC_BREAKER: ${{ vars.SMC_BREAKER }}
+          SMC_MSS_CLOSE: ${{ vars.SMC_MSS_CLOSE }}
+          SMC_MSS_MARGIN: ${{ vars.SMC_MSS_MARGIN }}
+          SMC_MAX_DEPTH: ${{ vars.SMC_MAX_DEPTH }}
+          SMC_SWEEP_REJECT: ${{ vars.SMC_SWEEP_REJECT }}
+          SMC_MSS_VOL: ${{ vars.SMC_MSS_VOL }}
+          SMC_MSS_FAST: ${{ vars.SMC_MSS_FAST }}
+          SMC_TGT_1R: ${{ vars.SMC_TGT_1R }}
+          SMC_BE: ${{ vars.SMC_BE }}
           FILTER_HTF_ADX: ${{ vars.FILTER_HTF_ADX }}
           FILTER_ADX: ${{ vars.FILTER_ADX }}
           FILTER_CHOP: ${{ vars.FILTER_CHOP }}

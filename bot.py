@@ -1127,6 +1127,10 @@ def update_smc(tr, candles):
             return ev + [("closed", _px(min(op, SL), side), (min(op, SL) - E) / tr["risk"])]
         if hi >= TP:
             return ev + [("closed", tr["tp"], (TP - E) / tr["risk"])]
+        if SMC_BE and not tr.get("be") and hi >= E + SMC_BE * tr["risk"]:
+            SL = E + abs(tr["entry"]) * FEE_PCT / 100              # breakeven + fees
+            tr["be"], tr["sl"] = True, _px(SL, side)
+            ev.append(("be", tr["sl"]))
     if tr["status"] == "filled" and candles and time.time() * 1000 - tr["opened"] > MAX_TRADE_DAYS * 86400000:
         last = _px(candles[-1]["c"], side)
         ev.append(("closed", candles[-1]["c"], (last - E) / tr["risk"]))
@@ -1140,6 +1144,9 @@ def manage_smc(st, key, tr, candles):
         if ev[0] == "filled":
             tg(f"✅ {name}: limit order <b>filled</b> at <code>{fp(ev[1])}</code>\n"
                f"SL <code>{fp(tr['sl'])}</code> | TP <code>{fp(tr['tp'])}</code> – make sure both are set.")
+        elif ev[0] == "be":
+            tg(f"🛡 {name}: price reached +{SMC_BE:g}R – <b>move SL to breakeven</b> "
+               f"<code>{fp(ev[1])}</code> (entry + fees). Loss is no longer possible.")
         elif ev[0] == "cancelled":
             tg(f"❌ {name}: <b>cancel the limit order</b> ({ev[1]}). No trade.")
             st.setdefault("cancelled", 0)
@@ -1150,7 +1157,7 @@ def manage_smc(st, key, tr, candles):
             r = ev[2]
             net = r - tr["fee_r"]
             usd = net * tr.get("usd_r", RISK_USD)
-            what = "🎯 TP hit" if r > 0 else "🛑 SL hit"
+            what = "🎯 TP hit" if r > 0.3 else ("⚖️ breakeven" if tr.get("be") and r > -0.1 else "🛑 SL hit")
             tg(f"🏁 {name} closed at <code>{fp(ev[1])}</code> – {what}\n"
                f"Result: <b>{r:+.2f}R</b> (after fees ~{net:+.2f}R ≈ <b>{'+' if usd >= 0 else '−'}${abs(usd):.2f}</b>)")
             st["closed"].append({"sym": tr["sym"], "side": tr["side"], "tf": tr["tf"], "strategy": "smc",
@@ -1726,6 +1733,13 @@ def _smc_long(C, H, entry_mode, pending=False):
             "session": 7 <= (C[s]["t"] // 3600000) % 24 < 20,            # London / New York hours (UTC)
             "vol": (vol[s] / (sum(vol[s - 20:s]) / 20)) if s >= 20 and sum(vol[s - 20:s]) > 0 else 0.0,
         }
+        rng = h[m] - l[m]
+        q["mss_close"] = (cl[m] - l[m]) / rng if rng > 0 else 0.0         # 1 = MSS closed at its high
+        q["mss_margin"] = (cl[m] - level) / a                            # how far the close broke the level
+        q["sweep_depth"] = (L - sweep_low) / a                           # how deep the sweep went (ATRs)
+        q["sweep_rej"] = rec == s                                        # sweep candle itself closed back above
+        q["mss_vol"] = (vol[m] / (sum(vol[m - 20:m]) / 20)) if m >= 20 and sum(vol[m - 20:m]) > 0 else 0.0
+        q["mss_bars"] = m - s                                            # candles from sweep to MSS
         k4 = bisect.bisect_right(hct, C[s]["ct"]) - 1
         ha = HA[k4] if k4 >= 0 and HA[k4] else a
         q["htf_poi"] = any(abs(v2 - sweep_low) <= 0.5 * ha for i2, v2 in hpl
@@ -1828,6 +1842,14 @@ SMC_QUALITY = [
     ("Fix: SHORT only in coin 4h downtrend", "SMC_SHORT_TREND", 1, lambda t, v: t["side"] == "LONG" or t["trend"]),
     ("Fix: coin cooldown 72h after SL", "SMC_COOLDOWN", 72, lambda t, v: t.get("cool_ok", True)),
     ("Fix: pause after 3 SL in 24h", "SMC_BREAKER", 3, lambda t, v: t.get("breaker_ok", True)),
+    # false-breakout candidates (fake sweeps / weak MSS)
+    ("Anti-fake: MSS closes in top 30% of candle", "SMC_MSS_CLOSE", 0.7, lambda t, v: t.get("mss_close", 1) >= v),
+    ("Anti-fake: MSS close ≥0.2 ATR past level", "SMC_MSS_MARGIN", 0.2, lambda t, v: t.get("mss_margin", 9) >= v),
+    ("Anti-fake: sweep ≤1 ATR deep", "SMC_MAX_DEPTH", 1.0, lambda t, v: t.get("sweep_depth", 0) <= v),
+    ("Anti-fake: sweep candle closes back in", "SMC_SWEEP_REJECT", 1, lambda t, v: t.get("sweep_rej", True)),
+    ("Anti-fake: MSS volume ≥1.5× average", "SMC_MSS_VOL", 1.5, lambda t, v: t.get("mss_vol", 9) >= v),
+    ("Anti-fake: MSS within 6 candles of sweep", "SMC_MSS_FAST", 6, lambda t, v: t.get("mss_bars", 0) <= v),
+    ("Loss-fix: target ≥1R (no tiny TPs)", "SMC_TGT_1R", 1.0, lambda t, v: t["tgt_r"] >= v),
 ]
 BTC_VARS = ("SMC_BTC", "SMC_BTC_ADX", "SMC_BTC_STABLE")
 
@@ -1891,6 +1913,27 @@ def load_smc_quality():
 SMC_ACTIVE = load_smc_quality()
 
 
+def load_smc_be():
+    """Breakeven stop: move SL to entry (+fees) once price reaches N x R. 0 = off.
+    Validated value from smc_filters.json; repo variable SMC_BE overrides (0 turns it off)."""
+    val = 0.0
+    try:
+        with open(SMC_FILTERS_FILE) as f:
+            val = float(json.load(f).get("be", 0) or 0)
+    except Exception:
+        pass
+    raw = os.getenv("SMC_BE", "").strip()
+    if raw:
+        try:
+            val = float(raw)
+        except ValueError:
+            print(f"Ignoring invalid SMC_BE={raw!r}")
+    return max(0.0, val)
+
+
+SMC_BE = load_smc_be()
+
+
 def smc_quality_ok(x, active=None):
     active = SMC_ACTIVE if active is None else active
     for _, var, _, fn in SMC_QUALITY:
@@ -1914,11 +1957,31 @@ def _smc_liq(C, s):
     return _simulate_tp(C, s, s["side"], abs(s["liq"] - s["entry"]))
 
 
+def _smc_liq_be(C, s, be_r=1.0):
+    """Liquidity TP (else 2R) with the stop moved to entry + fees after a candle reaches be_r x R.
+    Gross R: -1 (SL), target R, or the fee cover (≈ 0 net) when stopped at breakeven."""
+    side, risk = s["side"], abs(s["entry"] - s["sl"])
+    tp_dist = abs(s["liq"] - s["entry"]) if s["liq"] is not None else 2.0 * risk
+    E, S = _px(s["entry"], side), _px(s["sl"], side)
+    TP, trig, cover = E + tp_dist, E + be_r * risk, abs(s["entry"]) * FEE_PCT / 100
+    stop, moved = S, False
+    for x in C[s["e"] + 1:]:
+        hi, lo = (x["h"], x["l"]) if side == "LONG" else (-x["l"], -x["h"])
+        if lo <= stop:
+            return -1.0 if not moved else cover / risk
+        if hi >= TP:
+            return tp_dist / risk
+        if not moved and hi >= trig:
+            stop, moved = E + cover, True
+    return None
+
+
 SMC_EXITS = [
     ("Fixed 1.5R", _smc(lambda C, s: simulate(C, s, s["side"], 1.5))),
     ("Fixed 2R", _smc(lambda C, s: simulate(C, s, s["side"], 2.0))),
     ("Fixed 3R", _smc(lambda C, s: simulate(C, s, s["side"], 3.0))),
     ("Prev high/low (liquidity)", _smc(_smc_liq)),
+    ("Liquidity + breakeven at 1R", _smc(lambda C, s: _smc_liq_be(C, s, 1.0))),
     ("Trail 3 ATR", _smc(lambda C, s: _simulate_trail(C, s, s["side"], 3.0))),
 ]
 SMC_TESTS = [
@@ -1942,9 +2005,9 @@ def validate_quality(trades):
             and (not SMC_REQUIRE_TREND or t["trend"]) and passes_filters(t)]
     tag_sequence(base, ex)
 
-    def ev(sel):
-        tr = _stats([t for t in sel if t["time"] < cut], ex, FEE_PCT)
-        te = _stats([t for t in sel if t["time"] >= cut], ex, FEE_PCT)
+    def ev(sel, key=ex):
+        tr = _stats([t for t in sel if t["time"] < cut], key, FEE_PCT)
+        te = _stats([t for t in sel if t["time"] >= cut], key, FEE_PCT)
         return tr[0], tr[2], te[0], te[2]
 
     bn, bavg, btn, btavg = ev(base)
@@ -1976,7 +2039,12 @@ def validate_quality(trades):
     if not combo:
         cur = (bn, bavg, btn, btavg)
 
-    result = {"filters": combo, "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+    be_key = "Liquidity + breakeven at 1R"
+    bev = ev(apply(combo), be_key)
+    be_on = bev[0] >= 60 and bev[2] >= 20 and bev[1] >= cur[1] + 0.01 and bev[3] > cur[3] and bev[3] > 0
+    be_line = (f"Breakeven at 1R: train {bev[1]:+.2f}R, test {bev[3]:+.2f}R vs without "
+               f"{cur[1]:+.2f}R / {cur[3]:+.2f}R → {'✅ applied' if be_on else '❌ not applied'}")
+    result = {"filters": combo, "be": 1.0 if be_on else 0.0, "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
               "exit": ex, "baseline": {"train": [bn, round(bavg, 3)], "test": [btn, round(btavg, 3)]},
               "with_filters": {"train": [cur[0], round(cur[1], 3)], "test": [cur[2], round(cur[3], 3)]}}
     with open(SMC_FILTERS_FILE, "w") as f:
@@ -1989,12 +2057,14 @@ def validate_quality(trades):
              f"| Filter | Train | Test | Removed trades | Passed |\n|---|---|---|---|---|\n"
              f"| **Baseline (no quality filter)** | {bn} / {bavg:+.2f}R | {btn} / {btavg:+.2f}R | | |\n"
              + "\n".join(rows) +
-             f"\n\n**Applied to live signals:** {names} → train {cur[0]} / {cur[1]:+.2f}R, test {cur[2]} / {cur[3]:+.2f}R\n")
+             f"\n\n**Applied to live signals:** {names} → train {cur[0]} / {cur[1]:+.2f}R, test {cur[2]} / {cur[3]:+.2f}R\n"
+             f"\n**Loss control:** {be_line}\n")
     msg = (f"\n<b>Quality filters (train → last 60 days test)</b>\n"
            f"Baseline: train {bavg:+.2f}R ({bn}), test {btavg:+.2f}R ({btn})\n"
            + ("Passed: " + ", ".join(p[1] for p in passed) if passed else "Passed: none") + "\n"
            f"✅ <b>Applied to live:</b> {names}\n"
-           f"With them: train {cur[1]:+.2f}R ({cur[0]}), test {cur[3]:+.2f}R ({cur[2]})")
+           f"With them: train {cur[1]:+.2f}R ({cur[0]}), test {cur[3]:+.2f}R ({cur[2]})\n"
+           f"🛡 {be_line}")
     return table, msg
 
 
@@ -2079,6 +2149,10 @@ def _exit_detail(C, s, side, kind, v, sl):
     risk = E - _px(s["sl"], side)
     if s.get("fill_loss"):                                   # SMC: stopped out in the fill candle
         return sl, s["e"]
+    be_trig = None
+    if kind == "price_be":                                   # liquidity TP + breakeven stop at v x R
+        be_trig, cover = E + v * risk, abs(s["entry"]) * FEE_PCT / 100
+        kind = "price"
     if kind == "price":                                      # fixed target price (SMC liquidity TP)
         kind, tp = "fixed", _px(s["tp"], side)
     else:
@@ -2092,6 +2166,8 @@ def _exit_detail(C, s, side, kind, v, sl):
         if kind == "fixed":
             if hi >= tp:
                 return _px(tp, side), i
+            if be_trig is not None and hi >= be_trig and stop < E + cover:
+                stop = E + cover                             # from the next candle on
         else:
             best = max(best, hi)
             stop = max(stop, best - dist)
@@ -2116,7 +2192,7 @@ def send_trade_log(log, balance, exit_name, days):
         when = datetime.fromtimestamp(t["open"] / 1000, IST).strftime("%d %b %H:%M")
         shut = datetime.fromtimestamp(t["close"] / 1000, IST).strftime("%d %b %H:%M") if t["close"] else "open"
         icon = "🟢" if t["side"] == "LONG" else "🔴"
-        tag = {"TP": "🎯TP", "SL": "🛑SL", "LIQ": "💀LIQ", "open": "⏳open"}[t["why"]]
+        tag = {"TP": "🎯TP", "SL": "🛑SL", "LIQ": "💀LIQ", "BE": "⚖️BE", "open": "⏳open"}[t["why"]]
         rows.append(f"| {i} | {when} | {shut} | {t['sym']} | {t['side']} | {t['lev']}x | {fp(t['entry'])} | {fp(t['exit'])} "
                     f"| {tag} | {money(t['pnl'])} | ${bal:.2f} |")
         lines.append(f"{i}. {icon} {t['sym']} {t['lev']}x | {when} → {shut[:6]} | {tag} {money(t['pnl'])} → ${bal:.2f}")
@@ -2193,7 +2269,12 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     RISK_USD = risk
     strategy = strategy or ("smc" if STRATEGY == "both" else STRATEGY)
     if strategy == "smc":
-        exits = [("Liquidity TP", "price", None), ("Fixed 3R", "fixed", 3.0), ("Fixed 2R", "fixed", 2.0)]
+        if SMC_BE:
+            exits = [(f"Liquidity TP + BE {SMC_BE:g}R", "price_be", SMC_BE), ("Liquidity TP (no BE)", "price", None),
+                     ("Fixed 3R", "fixed", 3.0), ("Fixed 2R", "fixed", 2.0)]
+        else:
+            exits = [("Liquidity TP", "price", None), ("Liquidity TP + BE 1R", "price_be", 1.0),
+                     ("Fixed 3R", "fixed", 3.0), ("Fixed 2R", "fixed", 2.0)]
     else:
         exits = [("Trail 3 ATR", "trail", TRAIL_ATR), ("Fixed 2R", "fixed", 2.0), ("Fixed 1R", "fixed", 1.0)]
     per_hour = {"15m": 4, "30m": 2, "1h": 1, "2h": 0.5, "4h": 0.25}.get(TIMEFRAME, 1)
@@ -2325,6 +2406,8 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                     why = "LIQ"
                 elif c.get("tp") is not None and abs(px - c["tp"]) <= tol:
                     why = "TP"
+                elif abs(px - c["entry"]) <= abs(c["entry"]) * 0.002 and abs(px - c["sl"]) > tol:
+                    why = "BE"
                 elif abs(px - c["sl"]) <= tol or p < 0:
                     why = "SL"
                 else:
