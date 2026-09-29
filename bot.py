@@ -264,7 +264,7 @@ def futures_only(candidates, n):
     """Keep the first n candidates that are listed on Binance Futures."""
     from concurrent.futures import ThreadPoolExecutor
     found, errors = [], 0
-    for i in range(0, min(len(candidates), 200), 25):
+    for i in range(0, min(len(candidates), 300), 25):
         chunk = candidates[i:i + 25]
         with ThreadPoolExecutor(max_workers=10) as ex:
             results = list(ex.map(lambda c: _safe_fut(c), chunk))
@@ -2081,7 +2081,11 @@ def main():
                     help="risk = same $ loss per trade (default), fixed = margin x leverage")
     ap.add_argument("--risk", type=float, default=1.0, help="$ loss at SL in risk sizing")
     ap.add_argument("--strategy", choices=["smc", "sd", ""], default="", help="account mode strategy")
+    ap.add_argument("--top-n", type=int, default=0, help="account/backtest: number of top futures coins")
     args = ap.parse_args()
+    if args.top_n > 0 and (args.account or args.smc or args.backtest or args.amd):
+        global TOP_N
+        TOP_N = min(args.top_n, 150)                      # only for backtests; live scan keeps its setting
     resolve_symbols()
     if args.test:
         ok = tg(f"👋 <b>S&D bot connected!</b>\n{len(SYMBOLS)} coins: "

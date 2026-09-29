@@ -30,6 +30,9 @@ on:
       risk:
         description: "account mode (risk sizing): $ loss if SL is hit"
         default: "1"
+      coins:
+        description: "account mode: number of top futures coins (live scan is not affected)"
+        default: "50"
       strategy:
         description: "account mode: strategy to simulate"
         type: choice
@@ -105,7 +108,7 @@ jobs:
               --balance "${{ github.event.inputs.balance }}" --margin "${{ github.event.inputs.margin }}" \
               --leverage "${{ github.event.inputs.leverage }}" --days "${{ github.event.inputs.days }}" \
               --sizing "${{ github.event.inputs.sizing }}" --risk "${{ github.event.inputs.risk }}" \
-              --strategy "${{ github.event.inputs.strategy }}"
+              --strategy "${{ github.event.inputs.strategy }}" --top-n "${{ github.event.inputs.coins }}"
           else python bot.py
           fi
 
