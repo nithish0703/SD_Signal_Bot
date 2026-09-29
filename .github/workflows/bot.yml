@@ -69,6 +69,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           SYMBOLS: ${{ vars.SYMBOLS }}
           TOP_N: ${{ vars.TOP_N }}
           COIN_SELECT: ${{ vars.COIN_SELECT }}

@@ -93,6 +93,8 @@ HEARTBEAT_HOUR_IST = 9     # daily "bot alive" message after 9 AM IST
 
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_CHATS = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()      # ntfy.sh phone push (optional, secret topic name)
+NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh").strip().rstrip("/")
 MANUAL_SYMBOLS = [s.strip().upper() for s in os.getenv("SYMBOLS", "").split(",") if s.strip()]
 if os.getenv("TOP_N", "").strip().isdigit():
     TOP_N = int(os.getenv("TOP_N"))
@@ -924,6 +926,30 @@ def tg(text):
     return ok
 
 
+def push(title, text, priority=3, tags=None):
+    """Phone push through ntfy (free app). priority 5 = urgent (alarm-like, can bypass Do Not Disturb).
+    Live events only, main branch only (dev test runs never ring the phone)."""
+    if not NTFY_TOPIC or os.getenv("GITHUB_REF_NAME", "main") != "main":
+        return False
+    plain = re.sub(r"<[^>]+>", "", text).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    try:
+        r = requests.post(NTFY_SERVER, json={"topic": NTFY_TOPIC, "title": title, "message": plain[:3500],
+                                             "priority": priority, "tags": tags or []}, timeout=10)
+        if r.status_code != 200:
+            print("ntfy error:", r.status_code, r.text[:200])
+        return r.status_code == 200
+    except Exception as e:
+        print("ntfy error:", e)
+        return False
+
+
+def notify(text, title, priority=3, tags=None):
+    """Telegram + ntfy push. Returns True if Telegram got it (that is what marks a signal as sent)."""
+    ok = tg(text)
+    push(title, text, priority, tags)
+    return ok
+
+
 def fp(x):
     ax = abs(x)
     d = 2 if ax >= 100 else 3 if ax >= 10 else 4 if ax >= 1 else 5 if ax >= 0.1 else 6 if ax >= 0.01 else 8
@@ -1228,16 +1254,19 @@ def manage_smc(st, key, tr, candles):
         if ev[0] == "filled":
             fu = tr.get("fut")
             if fu:
-                tg(f"✅ {name}: limit order <b>filled</b> at <code>{fp(fu['entry'])}</code>\n"
-                   f"SL <code>{fp(fu['sl'])}</code> | TP <code>{fp(fu['tp'])}</code> (futures) – make sure both are set.")
+                notify(f"✅ {name}: limit order <b>filled</b> at <code>{fp(fu['entry'])}</code>\n"
+                       f"SL <code>{fp(fu['sl'])}</code> | TP <code>{fp(fu['tp'])}</code> (futures) – make sure both are set.",
+                       f"FILLED {tr['sym']} {tr['side']}", 4, ["white_check_mark"])
             else:
-                tg(f"✅ {name}: limit order <b>filled</b> at <code>{fp(ev[1])}</code>\n"
-                   f"SL <code>{fp(tr['sl'])}</code> | TP <code>{fp(tr['tp'])}</code> – make sure both are set.")
+                notify(f"✅ {name}: limit order <b>filled</b> at <code>{fp(ev[1])}</code>\n"
+                       f"SL <code>{fp(tr['sl'])}</code> | TP <code>{fp(tr['tp'])}</code> – make sure both are set.",
+                       f"FILLED {tr['sym']} {tr['side']}", 4, ["white_check_mark"])
         elif ev[0] == "be":
             tg(f"🛡 {name}: price reached +{SMC_BE:g}R – <b>move SL to breakeven</b> "
                f"<code>{fp(ev[1])}</code> (entry + fees). Loss is no longer possible.")
         elif ev[0] == "cancelled":
-            tg(f"❌ {name}: <b>cancel the limit order</b> ({ev[1]}). No trade.")
+            notify(f"❌ {name}: <b>cancel the limit order</b> ({ev[1]}). No trade.",
+                   f"CANCEL {tr['sym']} order", 4, ["x"])
             st.setdefault("cancelled", 0)
             st["cancelled"] += 1
             del st["open"][key]
@@ -1256,8 +1285,10 @@ def manage_smc(st, key, tr, candles):
                     px = fu["sl"]
                 else:
                     px = ev[1] * fu["ratio"]
-            tg(f"🏁 {name} closed at <code>{fp(px)}</code> – {what}\n"
-               f"Result: <b>{r:+.2f}R</b> (after fees ~{net:+.2f}R ≈ <b>{'+' if usd >= 0 else '−'}${abs(usd):.2f}</b>)")
+            notify(f"🏁 {name} closed at <code>{fp(px)}</code> – {what}\n"
+               f"Result: <b>{r:+.2f}R</b> (after fees ~{net:+.2f}R ≈ <b>{'+' if usd >= 0 else '−'}${abs(usd):.2f}</b>)",
+                   f"CLOSED {tr['sym']} {'TP' if r > 0.3 else 'SL'} {'+' if usd >= 0 else '-'}${abs(usd):.2f}", 3,
+                   ["tada" if r > 0 else "red_circle"])
             st["closed"].append({"sym": tr["sym"], "side": tr["side"], "tf": tr["tf"], "strategy": "smc",
                                  "r": round(r, 3), "net": round(net, 3), "simple": round(net, 3),
                                  "usd": round(usd, 2), "closed": int(time.time())})
@@ -1362,7 +1393,9 @@ def scan_smc(st, sym, C, H, src, btc_fn=None):
         except Exception as e:
             print("futures levels error", sym, e)
             fl = None
-        if tg(smc_message(sym, x, src, fl)):
+        pair = sym[:-4] + "/USDT" if sym.endswith("USDT") else sym
+        if notify(smc_message(sym, x, src, fl), f"SIGNAL {pair} {'BUY' if x['side'] == 'LONG' else 'SELL'}",
+                  5, ["rotating_light"]):
             st["sent"][key] = int(time.time())
             open_smc_trade(st, key, sym, x, src, C)
             if fl:
@@ -2793,6 +2826,8 @@ def main():
                 f"Filters: {active_filters()}\n"
                 + (f"SMC quality filters (validated): {smc_quality_txt()}\n" if STRATEGY != "sd" else "")
                 + f"Sizing: ${' / $'.join(f'{m:g}' for m in MARGIN_OPTIONS)} margin, max loss ${RISK_USD:g}/trade, leverage ≤{MAX_LEVERAGE}x")
+        if NTFY_TOPIC:
+            print("ntfy push:", push("NKs SMC bot test", "Phone push works. Signals will ring like this.", 5, ["rotating_light"]))
         sys.exit(0 if ok else 1)
     if args.backtest:
         run_backtest(args.candles)
