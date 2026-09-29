@@ -166,7 +166,8 @@ def fetch_klines(symbol, interval, limit, end_time=None, source=None):
                 continue
             now_ms = int(time.time() * 1000)
             candles = [{"t": int(k[0]), "o": float(k[1]), "h": float(k[2]), "l": float(k[3]),
-                        "c": float(k[4]), "v": float(k[5]), "ct": int(k[6])} for k in r.json()]
+                        "c": float(k[4]), "v": float(k[5]), "ct": int(k[6]),
+                        "tb": float(k[9]) if len(k) > 9 else None} for k in r.json()]   # tb = taker-buy volume
             candles = [x for x in candles if x["ct"] < now_ms]  # drop the running candle
             if not candles:
                 last_err = f"{name} empty"
@@ -642,7 +643,9 @@ def pivots(vals, p, is_high):
 def flip(candles):
     """Mirror prices so SHORT (supply) setups can reuse the LONG (demand) logic."""
     return [{"t": x["t"], "ct": x["ct"], "o": -x["o"], "c": -x["c"], "h": -x["l"], "l": -x["h"],
-             "v": x.get("v", 0.0)} for x in candles]
+             "v": x.get("v", 0.0),
+             "tb": (x.get("v", 0.0) - x["tb"]) if x.get("tb") is not None else None}   # buyers <-> sellers
+            for x in candles]
 
 # ============================ STRATEGY ============================
 
@@ -1674,6 +1677,8 @@ def _smc_long(C, H, entry_mode, pending=False):
     HADX = adx([x["h"] for x in H], [x["l"] for x in H], hc)
     o = [x["o"] for x in C]
     vol = [x.get("v", 0.0) for x in C]
+    tbv = [x.get("tb") for x in C]
+    atrp = [(A[i] / cl[i]) if A[i] and cl[i] else None for i in range(n)]
     hl = [x["l"] for x in H]
     HA = atr([x["h"] for x in H], hl, hc, ATR_LEN)
     hpl = pivots(hl, PIVOT_LEN, False)                    # 4h swing lows (for the HTF POI check)
@@ -1747,6 +1752,16 @@ def _smc_long(C, H, entry_mode, pending=False):
         q["adx_sig"] = ADX[sg] or 0.0
         q["chop_sig"] = CH[sg] if CH[sg] is not None else 100.0
         k5 = bisect.bisect_right(hct, C[sg]["ct"]) - 1
+        # order flow (taker volume): who was aggressive during the sweep and on the MSS candle
+        sv = sum(vol[s:rec + 1])
+        stb = [tbv[i] for i in range(s, rec + 1)]
+        q["sweep_sell"] = (1 - sum(stb) / sv) if sv > 0 and None not in stb else None
+        q["mss_buy"] = (tbv[m] / vol[m]) if vol[m] > 0 and tbv[m] is not None else None
+        q["sweep_hour"] = (C[s]["t"] // 3600000) % 24
+        q["sig_hour"] = (C[sg]["t"] // 3600000) % 24                     # hour the signal is sent (UTC)
+        q["weekend"] = datetime.fromtimestamp(C[sg]["ct"] / 1000, timezone.utc).weekday() >= 5
+        win = [v2 for v2 in atrp[max(0, sg - 720):sg + 1] if v2 is not None]   # ~30 days of 1h
+        q["atr_pct"] = (sum(1 for v2 in win if v2 <= atrp[sg]) / len(win) * 100) if win and atrp[sg] else 50.0
         q["trend_sig"] = k5 >= 0 and he[k5] is not None and hc[k5] > he[k5]
         k4 = bisect.bisect_right(hct, C[s]["ct"]) - 1
         ha = HA[k4] if k4 >= 0 and HA[k4] else a
@@ -1863,6 +1878,18 @@ SMC_QUALITY = [
     ("Regime: 1h CHOP ≤61.8 (not ranging)", "SMC_CHOP", 61.8, lambda t, v: t.get("chop_sig", 0) <= v),
     ("Trend: coin 4h trend agrees (long up / short down)", "SMC_TREND", 1, lambda t, v: t.get("trend_sig", True)),
     ("Anti-fake: MSS within 4 candles of sweep", "SMC_MSS_FAST4", 4, lambda t, v: t.get("mss_bars", 0) <= v),
+    # order flow / liquidity / volatility candidates (research round 3)
+    ("Order-flow: sellers absorbed at sweep (taker sell ≥55%)", "SMC_ABSORB", 0.55,
+     lambda t, v: t.get("sweep_sell") is None or t["sweep_sell"] >= v),
+    ("Order-flow: MSS driven by buyers (taker buy ≥55%)", "SMC_MSS_FLOW", 0.55,
+     lambda t, v: t.get("mss_buy") is None or t["mss_buy"] >= v),
+    ("Liquidity: no sweep in thin hours (20–24 UTC)", "SMC_THIN_HOURS", 1, lambda t, v: not 20 <= t.get("sweep_hour", 12) < 24),
+    ("Session: no Asia signals (00–07 UTC)", "SMC_NO_ASIA", 1, lambda t, v: not 0 <= t.get("sig_hour", 12) < 7),
+    ("Session: no late-US signals (20–24 UTC)", "SMC_NO_LATE_US", 1, lambda t, v: not 20 <= t.get("sig_hour", 12) < 24),
+    ("Session: London+NY only (07–20 UTC signal)", "SMC_LDN_NY", 1, lambda t, v: 7 <= t.get("sig_hour", 12) < 20),
+    ("Liquidity: no weekend signals", "SMC_NO_WEEKEND", 1, lambda t, v: not t.get("weekend", False)),
+    ("Volatility: ATR% normal (20–80th pct of 30d)", "SMC_VOL_BAND", 1, lambda t, v: 20 <= t.get("atr_pct", 50) <= 80),
+    ("Risk: SL ≤4% (stop not too wide)", "SMC_MAX_SL", 4, lambda t, v: sl_pct(t) <= v),
 ]
 BTC_VARS = ("SMC_BTC", "SMC_BTC_ADX", "SMC_BTC_STABLE")
 
@@ -2059,6 +2086,24 @@ def validate_quality(trades):
         r = ev(apply(dict(combo, **{var: val})))
         better = r[0] >= 60 and r[2] >= 20 and r[1] > cur[1] and r[3] > cur[3]
         extra.append(f"| {lbl} | {r[0]} / {r[1]:+.2f}R | {r[2]} / {r[3]:+.2f}R | {'⬆️ both' if better else ''} |")
+    sessions = [("Asia 00–07 UTC (05:30–12:30 IST)", 0, 7), ("London 07–12 UTC (12:30–17:30 IST)", 7, 12),
+                ("London+NY 12–16 UTC (17:30–21:30 IST)", 12, 16), ("New York 16–20 UTC (21:30–01:30 IST)", 16, 20),
+                ("Late US 20–24 UTC (01:30–05:30 IST)", 20, 24)]
+    live = apply(combo)
+    srows, smsg = [], []
+    for name, a0, a1 in sessions + [("Weekend (Sat/Sun)", -1, -1)]:
+        if a0 < 0:
+            sel_b = [t for t in base if t.get("weekend")]
+            sel_l = [t for t in live if t.get("weekend")]
+        else:
+            sel_b = [t for t in base if a0 <= t.get("sig_hour", -1) < a1]
+            sel_l = [t for t in live if a0 <= t.get("sig_hour", -1) < a1]
+        rb, rl = ev(sel_b), ev(sel_l)
+        wl = _stats(sel_l, ex, FEE_PCT)
+        srows.append(f"| {name} | {rb[0]} / {rb[1]:+.2f}R | {rb[2]} / {rb[3]:+.2f}R | {rl[0]} / {rl[1]:+.2f}R "
+                     f"| {rl[2]} / {rl[3]:+.2f}R | {wl[1]:.0f}% |")
+        smsg.append(f"{name.split(' (')[0]}: {rl[0] + rl[2]} trades, win {wl[1]:.0f}%, "
+                    f"train {rl[1]:+.2f}R / test {rl[3]:+.2f}R")
     be_key = "Liquidity + breakeven at 1R"
     bev = ev(apply(combo), be_key)
     be_on = bev[0] >= 60 and bev[2] >= 20 and bev[1] >= cur[1] + 0.01 and bev[3] > cur[3] and bev[3] > 0
@@ -2082,7 +2127,10 @@ def validate_quality(trades):
              f"\n### Extra filter ON TOP of the applied ones (info only, not auto-applied)\n\n"
              f"Now: train {cur[0]} / {cur[1]:+.2f}R, test {cur[2]} / {cur[3]:+.2f}R. "
              "⬆️ = better in both periods (still small samples – treat as a hint).\n\n"
-             "| Add filter | Train | Test | |\n|---|---|---|---|\n" + "\n".join(extra) + "\n")
+             "| Add filter | Train | Test | |\n|---|---|---|---|\n" + "\n".join(extra) + "\n"
+             "\n### By session (signal hour, UTC) – where the false signals come from\n\n"
+             "| Session | Baseline train | Baseline test | Live filters train | Live filters test | Live win% |\n"
+             "|---|---|---|---|---|---|\n" + "\n".join(srows) + "\n")
     msg = (f"\n<b>Quality filters (train → last 60 days test)</b>\n"
            f"Baseline: train {bavg:+.2f}R ({bn}), test {btavg:+.2f}R ({btn})\n"
            + ("Passed: " + ", ".join(p[1] for p in passed) if passed else "Passed: none") + "\n"
@@ -2090,7 +2138,8 @@ def validate_quality(trades):
            f"With them: train {cur[1]:+.2f}R ({cur[0]}), test {cur[3]:+.2f}R ({cur[2]})\n"
            f"🛡 {be_line}\n"
            + (("➕ Extra filter better in both periods: " + ", ".join(e.split(" | ")[0].lstrip("| ") for e in extra if "⬆️" in e))
-              if any("⬆️" in e for e in extra) else "➕ No extra filter improves both periods"))
+              if any("⬆️" in e for e in extra) else "➕ No extra filter improves both periods")
+           + "\n\n🕒 <b>By session (live filters)</b>\n" + "\n".join(smsg))
     return table, msg
 
 

@@ -108,6 +108,15 @@ jobs:
           SMC_CHOP: ${{ vars.SMC_CHOP }}
           SMC_TREND: ${{ vars.SMC_TREND }}
           SMC_MSS_FAST4: ${{ vars.SMC_MSS_FAST4 }}
+          SMC_ABSORB: ${{ vars.SMC_ABSORB }}
+          SMC_MSS_FLOW: ${{ vars.SMC_MSS_FLOW }}
+          SMC_THIN_HOURS: ${{ vars.SMC_THIN_HOURS }}
+          SMC_NO_WEEKEND: ${{ vars.SMC_NO_WEEKEND }}
+          SMC_VOL_BAND: ${{ vars.SMC_VOL_BAND }}
+          SMC_MAX_SL: ${{ vars.SMC_MAX_SL }}
+          SMC_NO_ASIA: ${{ vars.SMC_NO_ASIA }}
+          SMC_NO_LATE_US: ${{ vars.SMC_NO_LATE_US }}
+          SMC_LDN_NY: ${{ vars.SMC_LDN_NY }}
           FILTER_HTF_ADX: ${{ vars.FILTER_HTF_ADX }}
           FILTER_ADX: ${{ vars.FILTER_ADX }}
           FILTER_CHOP: ${{ vars.FILTER_CHOP }}
