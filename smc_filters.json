@@ -1,29 +1,32 @@
 {
  "filters": {
   "SMC_MSS_FAST": 6,
-  "SMC_MIN_RR": 1.5
+  "SMC_LDN_NY": 1,
+  "SMC_MIN_RR": 1.5,
+  "SMC_NO_WEEKEND": 1,
+  "SMC_MAX_SL": 4
  },
  "be": 0.0,
- "updated": "2026-09-29 10:24 UTC",
+ "updated": "2026-09-29 11:01 UTC",
  "exit": "Prev high/low (liquidity)",
  "baseline": {
   "train": [
-   368,
-   0.196
+   360,
+   0.188
   ],
   "test": [
-   100,
-   -0.011
+   99,
+   0.052
   ]
  },
  "with_filters": {
   "train": [
-   173,
-   0.339
+   76,
+   0.446
   ],
   "test": [
-   45,
-   0.277
+   21,
+   0.654
   ]
  }
 }
