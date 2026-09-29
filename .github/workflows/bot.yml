@@ -104,6 +104,10 @@ jobs:
           SMC_MSS_FAST: ${{ vars.SMC_MSS_FAST }}
           SMC_TGT_1R: ${{ vars.SMC_TGT_1R }}
           SMC_BE: ${{ vars.SMC_BE }}
+          SMC_ADX: ${{ vars.SMC_ADX }}
+          SMC_CHOP: ${{ vars.SMC_CHOP }}
+          SMC_TREND: ${{ vars.SMC_TREND }}
+          SMC_MSS_FAST4: ${{ vars.SMC_MSS_FAST4 }}
           FILTER_HTF_ADX: ${{ vars.FILTER_HTF_ADX }}
           FILTER_ADX: ${{ vars.FILTER_ADX }}
           FILTER_CHOP: ${{ vars.FILTER_CHOP }}
