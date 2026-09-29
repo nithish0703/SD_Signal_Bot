@@ -20,11 +20,15 @@ Usage:
 """
 import argparse
 import bisect
+import csv
+import io
+import math
 import json
 import os
 import re
 import sys
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -287,29 +291,269 @@ def _safe_fut(sym):
         return "error"
 
 
-def resolve_symbols():
-    """Fill SYMBOLS: manual repo variable > top-volume futures coins > fallback list."""
+def volume_top_symbols(n):
+    """Top-n futures-listed coins by 24h volume (the original selection)."""
+    ranked, src = top_volume_ranked()
+    if ranked and src == "futures":               # futures API reachable: list is futures-only
+        return ranked[:n], src
+    if ranked:
+        syms, errors = futures_only(ranked, n)
+        if len(syms) >= min(n, 10):
+            return syms, src
+        print(f"Futures check failed ({errors} errors); using spot list without the check")
+        return ranked[:n], src + " (NOT futures-checked)"
+    return FALLBACK_SYMBOLS[:n], "fallback list"
+
+
+# ============================ COIN SELECTION ============================
+# Pick the best TOP_N coins from the top COIN_POOL futures coins, once a day, using:
+# volume, open interest, ATR %, ADX (4h), efficiency ratio, funding (premium index),
+# spread and BTC correlation. Safety limits remove illiquid / crowded / brand-new coins.
+COIN_SELECT = True
+COIN_POOL = 150
+MAX_SPREAD_PCT = 0.10      # spot bid/ask spread (proxy for futures spread)
+MIN_OI_USD = 10_000_000    # futures open interest (Binance public data, 1 day late)
+MAX_PREMIUM_PCT = 0.05     # |average premium index| (funding proxy); above = crowded trade
+MIN_HISTORY_DAYS = 60
+UNIVERSE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coin_universe.json")
+if os.getenv("COIN_SELECT", "").strip().lower() in ("0", "false", "no"):
+    COIN_SELECT = False
+COIN_POOL = _env_num("COIN_POOL", COIN_POOL, int)
+DATA_VISION = "https://data.binance.vision/data/futures/um/daily"
+
+
+def _zip_rows(url):
+    r = requests.get(url, timeout=20)
+    if r.status_code != 200:
+        return None
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        with z.open(z.namelist()[0]) as f:
+            return list(csv.reader(io.TextIOWrapper(f, "utf-8")))
+
+
+def futures_oi_usd(fut):
+    """Latest open interest value in USD from the daily metrics file (None if unavailable)."""
+    for lag in (1, 2):
+        d = (datetime.now(timezone.utc).date() - timedelta(days=lag)).isoformat()
+        try:
+            rows = _zip_rows(f"{DATA_VISION}/metrics/{fut}/{fut}-metrics-{d}.zip")
+        except Exception:
+            rows = None
+        if rows and len(rows) > 1:
+            head = rows[0]
+            if "sum_open_interest_value" in head:
+                i = head.index("sum_open_interest_value")
+                try:
+                    return float(rows[-1][i])
+                except (ValueError, IndexError):
+                    return None
+    return None
+
+
+def futures_premium_pct(fut):
+    """Average hourly premium index (%) of the last day: a proxy for funding pressure."""
+    for lag in (1, 2):
+        d = (datetime.now(timezone.utc).date() - timedelta(days=lag)).isoformat()
+        try:
+            rows = _zip_rows(f"{DATA_VISION}/premiumIndexKlines/{fut}/1h/{fut}-1h-{d}.zip")
+        except Exception:
+            rows = None
+        if rows:
+            vals = []
+            for r in rows:
+                try:
+                    vals.append(float(r[4]))
+                except (ValueError, IndexError):
+                    continue                              # header row
+            if vals:
+                return sum(vals) / len(vals) * 100
+    return None
+
+
+def spot_spreads():
+    """{symbol: spread %} from the spot order book (one request for all symbols)."""
+    for url in ("https://data-api.binance.vision/api/v3/ticker/bookTicker",
+                "https://api.binance.com/api/v3/ticker/bookTicker"):
+        try:
+            r = requests.get(url, timeout=20)
+            if r.status_code != 200:
+                continue
+            out = {}
+            for x in r.json():
+                b, a = float(x.get("bidPrice") or 0), float(x.get("askPrice") or 0)
+                if b > 0 and a > 0:
+                    out[x["symbol"]] = (a - b) / ((a + b) / 2) * 100
+            return out
+        except Exception:
+            continue
+    return {}
+
+
+def efficiency_ratio(cl, n=24, windows=7):
+    """Kaufman efficiency ratio: net move / total path, averaged over the last `windows` blocks."""
+    vals = []
+    for w in range(windows):
+        end = len(cl) - w * n
+        seg = cl[end - n - 1:end]
+        if len(seg) < n + 1:
+            break
+        path = sum(abs(seg[i] - seg[i - 1]) for i in range(1, len(seg)))
+        if path > 0:
+            vals.append(abs(seg[-1] - seg[0]) / path)
+    return sum(vals) / len(vals) if vals else None
+
+
+def _corr(a, b):
+    n = len(a)
+    if n < 30:
+        return None
+    ma, mb = sum(a) / n, sum(b) / n
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((y - mb) ** 2 for y in b)
+    if va <= 0 or vb <= 0:
+        return None
+    return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / math.sqrt(va * vb)
+
+
+def coin_metrics(sym, btc_ret, spreads):
+    fut = FUTURES_NAME.get(sym, sym)
+    C, src = fetch_klines(sym, "1h", 1000)
+    H, _ = fetch_klines(sym, "4h", 300, source=src)
+    D, _ = fetch_klines(sym, "1d", 90, source=src)
+    h = [x["h"] for x in C]; l = [x["l"] for x in C]; cl = [x["c"] for x in C]
+    A = atr(h, l, cl, ATR_LEN)
+    hadx = adx([x["h"] for x in H], [x["l"] for x in H], [x["c"] for x in H])
+    rets = {x["t"]: (x["c"] - x["o"]) / x["o"] for x in C[-336:] if x["o"]}
+    common = [t for t in rets if t in btc_ret]
+    return {
+        "sym": sym, "fut": fut,
+        "volume": sum(x.get("v", 0) * x["c"] for x in C[-24:]),
+        "atr_pct": (A[-1] / cl[-1] * 100) if A[-1] and cl[-1] else None,
+        "adx": hadx[-1],
+        "er": efficiency_ratio(cl),
+        "btc_corr": 1.0 if sym == "BTCUSDT" else _corr([rets[t] for t in common], [btc_ret[t] for t in common]),
+        "spread": spreads.get(sym),
+        "oi": futures_oi_usd(fut),
+        "premium": futures_premium_pct(fut),
+        "days": len(D),
+    }
+
+
+def build_universe(n):
+    """Score the top COIN_POOL futures coins and keep the best n. Returns (symbols, table)."""
+    from concurrent.futures import ThreadPoolExecutor
+    pool, src = volume_top_symbols(max(n, COIN_POOL))
+    spreads = spot_spreads()
+    try:
+        B, _ = fetch_klines("BTCUSDT", "1h", 1000)
+        btc_ret = {x["t"]: (x["c"] - x["o"]) / x["o"] for x in B[-336:] if x["o"]}
+    except Exception:
+        btc_ret = {}
+
+    def safe(sym):
+        try:
+            return coin_metrics(sym, btc_ret, spreads)
+        except Exception as e:
+            print("metrics error", sym, e)
+            return None
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        rows = [r for r in ex.map(safe, pool) if r]
+
+    kept, dropped = [], {}
+    for r in rows:
+        why = None
+        if r["days"] < MIN_HISTORY_DAYS:
+            why = "new listing"
+        elif r["spread"] is not None and r["spread"] > MAX_SPREAD_PCT:
+            why = "wide spread"
+        elif r["oi"] is not None and r["oi"] < MIN_OI_USD:
+            why = "low open interest"
+        elif r["premium"] is not None and abs(r["premium"]) > MAX_PREMIUM_PCT:
+            why = "extreme funding"
+        if why:
+            dropped[why] = dropped.get(why, 0) + 1
+        else:
+            kept.append(r)
+
+    def pct_rank(key, reverse=False, transform=None):
+        vals = [(transform(r[key]) if transform else r[key]) if r[key] is not None else None for r in kept]
+        known = sorted(v for v in vals if v is not None)
+        out = []
+        for v in vals:
+            if v is None or len(known) < 2:
+                out.append(0.5)                             # unknown -> neutral
+                continue
+            p = bisect.bisect_left(known, v) / (len(known) - 1)
+            out.append(1 - p if reverse else p)
+        return out
+
+    atr_known = sorted(r["atr_pct"] for r in kept if r["atr_pct"] is not None)
+    atr_mid = atr_known[len(atr_known) // 2] if atr_known else 0
+    parts = [
+        pct_rank("volume"),                                  # more volume = better fills
+        pct_rank("oi"),                                      # more open interest = real participation
+        pct_rank("atr_pct", reverse=True, transform=lambda v: abs(v - atr_mid)),   # moderate volatility
+        pct_rank("adx"),                                     # trending
+        pct_rank("er"),                                      # clean moves, less noise
+        pct_rank("premium", reverse=True, transform=abs),    # funding near neutral
+        pct_rank("spread", reverse=True),                    # tight spread
+        pct_rank("btc_corr"),                                # follows BTC (our BTC filter needs this)
+    ]
+    for i, r in enumerate(kept):
+        r["score"] = sum(p[i] for p in parts) / len(parts)
+    kept.sort(key=lambda r: r["score"], reverse=True)
+    chosen = [r["sym"] for r in kept[:n]]
+    if len(chosen) < min(n, 10):
+        raise RuntimeError(f"only {len(chosen)} coins passed the selection")
+    return chosen, {"pool": len(pool), "measured": len(rows), "dropped": dropped, "table": kept[:n]}
+
+
+def load_universe(n):
+    try:
+        with open(UNIVERSE_FILE) as f:
+            u = json.load(f)
+        if u.get("n") == n and time.time() - u.get("ts", 0) < 24 * 3600 and u.get("symbols"):
+            return u
+    except Exception:
+        pass
+    return None
+
+
+def resolve_symbols(allow_build=True):
+    """Fill SYMBOLS: manual variable > daily scored universe > top-volume futures coins > fallback."""
     global SYMBOLS
     if MANUAL_SYMBOLS:
         SYMBOLS = MANUAL_SYMBOLS
         print(f"Using {len(SYMBOLS)} coins from SYMBOLS variable")
         return
-    ranked, src = top_volume_ranked()
-    if ranked and src == "futures":               # futures API reachable: list is futures-only
-        SYMBOLS = ranked[:TOP_N]
-    elif ranked:
-        syms, errors = futures_only(ranked, TOP_N)
-        if len(syms) >= min(TOP_N, 10):
-            SYMBOLS = syms
-        else:                                     # futures check not reachable
-            print(f"Futures check failed ({errors} errors); using spot list without the check")
-            SYMBOLS = ranked[:TOP_N]
-            print(f"Top {len(SYMBOLS)} coins by 24h volume, NOT futures-checked: {', '.join(SYMBOLS)}")
+    if COIN_SELECT:
+        u = load_universe(TOP_N)
+        if u:
+            SYMBOLS = u["symbols"]
+            FUTURES_NAME.update(u.get("futures_names", {}))
+            print(f"Coin universe from {u.get('updated')}: {', '.join(SYMBOLS)}")
             return
-    else:
-        SYMBOLS = FALLBACK_SYMBOLS[:TOP_N]
-        print(f"Top list unavailable, using fallback list of {len(SYMBOLS)} coins")
-        return
+        if allow_build:
+            try:
+                syms, info = build_universe(TOP_N)
+                SYMBOLS = syms
+                u = {"n": TOP_N, "ts": int(time.time()),
+                     "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                     "symbols": syms, "futures_names": {k: v for k, v in FUTURES_NAME.items() if k in syms},
+                     "pool": info["pool"], "measured": info["measured"], "dropped": info["dropped"],
+                     "table": [{k: (round(v, 4) if isinstance(v, float) else v) for k, v in r.items()}
+                               for r in info["table"]]}
+                with open(UNIVERSE_FILE, "w") as f:
+                    json.dump(u, f, indent=1)
+                drop = ", ".join(f"{k} {v}" for k, v in info["dropped"].items()) or "none"
+                top = ", ".join(r["sym"].replace("USDT", "") for r in info["table"][:10])
+                tg(f"🪙 <b>Coin list updated</b> (best {len(syms)} of top {info['pool']})\n"
+                   f"Removed by safety limits: {drop}\nTop 10 by score: {top}")
+                print(f"Scored coin universe: {', '.join(SYMBOLS)}")
+                return
+            except Exception as e:
+                print("Coin selection failed, using volume ranking:", e)
+    SYMBOLS, src = volume_top_symbols(TOP_N)
     print(f"Top {len(SYMBOLS)} futures coins by 24h volume ({src}): {', '.join(SYMBOLS)}")
 
 
@@ -925,7 +1169,20 @@ def live_sequence_ok(st, sym, side):
     if "SMC_BREAKER" in SMC_ACTIVE:
         if sum(1 for c in losses if now - c["closed"] < 24 * 3600) >= SMC_ACTIVE["SMC_BREAKER"]:
             return False
+    if "SMC_MAX_SAME_DIR" in SMC_ACTIVE:
+        same = sum(1 for tr in st.get("open", {}).values()
+                   if tr.get("kind") == "smc" and tr.get("status") == "filled" and tr["side"] == side)
+        if same >= SMC_ACTIVE["SMC_MAX_SAME_DIR"]:
+            return False
     return True
+
+
+def live_bar_ok(st, sig_ct):
+    """Max N new SMC signals on the same candle (coins are scanned biggest volume first)."""
+    if "SMC_MAX_PER_BAR" not in SMC_ACTIVE:
+        return True
+    n = sum(1 for tr in st.get("open", {}).values() if tr.get("kind") == "smc" and tr.get("opened") == sig_ct)
+    return n < SMC_ACTIVE["SMC_MAX_PER_BAR"]
 
 
 def scan_smc(st, sym, C, H, src, btc_fn=None):
@@ -934,7 +1191,7 @@ def scan_smc(st, sym, C, H, src, btc_fn=None):
     for x in tag_btc(find_smc_setups(C, H, SMC_ENTRY, pending=True), sym, btc_fn):
         if not x.get("pending") or x["sig"] < n - SIGNAL_LOOKBACK or not smc_ok(x):
             continue
-        if not live_sequence_ok(st, sym, x["side"]):
+        if not live_sequence_ok(st, sym, x["side"]) or not live_bar_ok(st, x["time"]):
             continue
         if "SMC_MAX_FILL" in SMC_ACTIVE:                  # validated: only wait N candles for the fill
             x["expires_ct"] = min(x["expires_ct"],
@@ -1573,7 +1830,7 @@ SMC_QUALITY = [
 BTC_VARS = ("SMC_BTC", "SMC_BTC_ADX", "SMC_BTC_STABLE")
 
 
-def tag_sequence(trades, ex, cooldown_h=72, breaker_n=3):
+def tag_sequence(trades, ex, cooldown_h=72, breaker_n=3, max_bar=2, max_dir=3):
     """Flags that depend on earlier results: cool_ok (no SL on this coin+side in the last
     cooldown_h hours) and breaker_ok (fewer than breaker_n SLs in the last 24h, all coins)."""
     losses = sorted([(t["close_ct"], t["sym"], t["side"]) for t in trades
@@ -1586,18 +1843,36 @@ def tag_sequence(trades, ex, cooldown_h=72, breaker_n=3):
         t["cool_ok"] = not any(sym == t["sym"] and side == t["side"] and now - ct < cooldown_h * 3600000
                                for ct, sym, side in recent)
         t["breaker_ok"] = sum(1 for ct, _, _ in recent if now - ct < 24 * 3600000) < breaker_n
+    # correlation caps (simulated in order; blocked trades do not count as open)
+    rank = {sym: i for i, sym in enumerate(SYMBOLS)}
+    order = sorted(trades, key=lambda t: (t["time"], rank.get(t["sym"], 999)))
+    per_bar = {}
+    for t in order:                                      # max N new trades per candle, bigger coins first
+        per_bar[t["time"]] = per_bar.get(t["time"], 0) + 1
+        t["bar_ok"] = per_bar[t["time"]] <= max_bar
+    opened = []                                          # (close_ct, side) of trades let through
+    for t in order:
+        live = [(ct, sd) for ct, sd in opened if ct is None or ct > t["time"]]
+        t["dir_ok"] = sum(1 for _, sd in live if sd == t["side"]) < max_dir
+        if t["dir_ok"]:
+            opened.append((t.get("close_ct"), t["side"]))
+
+
 SMC_FILTERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smc_filters.json")
 
 
 def load_smc_quality():
     """Active quality filters: validated file first, explicit repo variables override."""
     active = {}
+    known = {var for _, var, _, _ in SMC_QUALITY}
     try:
         with open(SMC_FILTERS_FILE) as f:
-            active = {k: float(v) for k, v in json.load(f).get("filters", {}).items()}
+            active = {k: float(v) for k, v in json.load(f).get("filters", {}).items() if k in known}
     except Exception:
         pass
     for _, var, _, _ in SMC_QUALITY:
+        if var not in known:
+            continue
         raw = os.getenv(var, "").strip()
         if raw:
             try:
@@ -1927,7 +2202,8 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                               "sl": s["sl"], "tp": s.get("tp")})
         print(f"{sym}: {sum(1 for c in cands if c['sym'] == sym)} setups")
         time.sleep(0.1)
-    cands.sort(key=lambda c: c["t"])
+    _rank = {sym: i for i, sym in enumerate(SYMBOLS)}
+    cands.sort(key=lambda c: (c["t"], _rank.get(c["sym"], 999)))   # same candle: bigger coins first
 
     def pnl(c, px):
         if c["liq"] and (px <= c["liq_px"] if c["side"] == "LONG" else px >= c["liq_px"]):
@@ -1947,7 +2223,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
 
         def settle(until):
             nonlocal free, peak, max_dd
-            for sym_, (ct, back) in sorted(open_.items(), key=lambda kv: kv[1][0] or 1e20):
+            for sym_, (ct, back, _sd) in sorted(open_.items(), key=lambda kv: kv[1][0] or 1e20):
                 if ct is not None and ct <= until:
                     free += back
                     del open_[sym_]
@@ -1957,6 +2233,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
 
         loss_ev = []                                             # (close_ct, sym, side) of losing trades
         skipped_rule = 0
+        bar_count = {}                                           # new trades per candle
         for c in cands:
             settle(c["t"])
             if c["sym"] in open_:
@@ -1976,16 +2253,24 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                         1 for ct0, _, _ in past if c["t"] - ct0 < 24 * 3600000) >= SMC_ACTIVE["SMC_BREAKER"]:
                     skipped_rule += 1
                     continue
+                if "SMC_MAX_PER_BAR" in SMC_ACTIVE and bar_count.get(c["t"], 0) >= SMC_ACTIVE["SMC_MAX_PER_BAR"]:
+                    skipped_rule += 1
+                    continue
+                if "SMC_MAX_SAME_DIR" in SMC_ACTIVE and sum(
+                        1 for v in open_.values() if v[2] == c["side"]) >= SMC_ACTIVE["SMC_MAX_SAME_DIR"]:
+                    skipped_rule += 1
+                    continue
+                bar_count[c["t"]] = bar_count.get(c["t"], 0) + 1
             px, ct = c["res"][lbl]
             free -= margin
             taken += 1
             if px is None:                                         # still open: mark to market
                 p = pnl(c, last_close[c["sym"]])
-                open_[c["sym"]] = (None, margin + p)
+                open_[c["sym"]] = (None, margin + p, c["side"])
                 pnls.append(("open", p))
             else:
                 p = pnl(c, px)
-                open_[c["sym"]] = (ct, margin + p)
+                open_[c["sym"]] = (ct, margin + p, c["side"])
                 pnls.append(("closed", p))
                 wins += p > 0
                 if p < 0:
@@ -2009,7 +2294,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
             fees += c["pos"] * FEE_PCT / 100
             max_open = max(max_open, len(open_))
         settle(1e20)
-        unreal = sum(back - margin for ct, back in open_.values())
+        unreal = sum(back - margin for ct, back, _sd in open_.values())
         final = free + margin * len(open_) + unreal
         closed = [p for k, p in pnls if k == "closed"]
         streak = worst = 0
@@ -2058,7 +2343,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 f"fees ${r['fees']:.2f}"
                 + (f", {r['open']} still open ({money(r['unreal'])})" if r["open"] else "")
                 + (f", skipped {r['skip_cash']} (no free balance)" if r["skip_cash"] else "")
-                + (f", {r['skip_rule']} blocked by cooldown/breaker" if r.get("skip_rule") else "")
+                + (f", {r['skip_rule']} blocked by risk rules" if r.get("skip_rule") else "")
                 + (f", {r['liqs']} liquidated" if r["liqs"] else "") + "\n")
     msg += "\nFunding & slippage not included. Full table: GitHub → Actions → run summary."
     tg(msg)

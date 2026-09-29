@@ -66,6 +66,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SYMBOLS: ${{ vars.SYMBOLS }}
           TOP_N: ${{ vars.TOP_N }}
+          COIN_SELECT: ${{ vars.COIN_SELECT }}
+          COIN_POOL: ${{ vars.COIN_POOL }}
           MIN_SCORE: ${{ vars.MIN_SCORE }}
           MIN_SL_PCT: ${{ vars.MIN_SL_PCT }}
           FEE_PCT: ${{ vars.FEE_PCT }}
@@ -119,6 +121,7 @@ jobs:
           git config user.email "sd-signal-bot@users.noreply.github.com"
           git add state.json
           if [ -f smc_filters.json ]; then git add smc_filters.json; fi
+          if [ -f coin_universe.json ]; then git add coin_universe.json; fi
           if ! git diff --cached --quiet; then
             git commit -m "bot: update state"
             git pull --rebase --autostash || true

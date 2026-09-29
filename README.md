@@ -84,6 +84,19 @@ Variable add panninaa adutha run-la irundhu apply aagum. Delete panninaa default
 | `RISK_USD` | `1` | SL hit aana max loss ($). Unga total account-la ~1% vechukkonga |
 | `MAX_LEVERAGE` | `20` | Idha thaandi leverage suggest pannaadhu |
 
+### Coin selection (8 metrics, dhinamum oru dhadava)
+Top 150 Futures coins-la irundhu best 50 (`TOP_N`) choose pannum. Coin selection-ku mattum; trade rules maaraadhu.
+
+**Safety limits** (fail aana coin varaadhu): spread ≤ 0.10%, open interest ≥ $10M, |funding (premium)| ≤ 0.05%, history ≥ 60 naal.
+
+**Score** (8 metrics, percentile average): volume ↑, open interest ↑, ATR% (moderate), 4h ADX ↑, efficiency ratio ↑ (clean moves),
+funding neutral, spread ↓, BTC correlation ↑ (BTC filter-ku venum).
+
+- Result `coin_universe.json`-la save aagum, 24h-ku oru dhadava refresh. Telegram-la "🪙 Coin list updated" varum.
+- Data fetch fail aanaa, pazhaiya volume top 50-ku fallback.
+- Off panna: Variables-la `COIN_SELECT` = `0`. Pool size: `COIN_POOL` (default 150).
+- ⚠️ Backtest / account modes-um inniku choose aana coins-a use pannum, so past results konjam optimistic-a irukkum.
+
 ### Live strategy: SMC (default)
 `STRATEGY` variable: `smc` (default), `sd` (supply & demand), `both`.
 
@@ -111,7 +124,6 @@ strong displacement, big FVG, equal lows/highs, London/NY session, 4h POI, targe
 BTC 4h ADX ≥20, BTC trend 2 naal stable, SL ≥1.5%, SHORT coin 4h downtrend-la mattum,
 oru coin-la SL-ku appuram 72h cooldown, 24h-la 3 SL aana pause. Table-la ovvonnum evvalavu losses / wins remove pannudhu-nu kaatum.
 Cooldown & pause live-la bot-oda sonna paper trades vechu work aagum; account mode-la simulate aagum.
-
 ### SMC backtest (sweep → MSS → FVG)
 Actions → Run workflow → mode **smc**. Swing low/high sweep → reclaim → MSS (structure break) → displacement FVG-la
 limit entry (edge / 50%), SL sweep-ku appuram. Exits: 1.5R, 2R, 3R, previous high/low (liquidity), trail 3 ATR.
