@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest the AMD / Power of 3 model"
+        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG"
         type: choice
-        options: [scan, test, backtest, account, amd]
+        options: [scan, test, backtest, account, amd, smc]
         default: scan
       balance:
         description: "account mode: starting balance ($)"
@@ -76,6 +76,7 @@ jobs:
           if [ "$MODE" = "test" ]; then python bot.py --test
           elif [ "$MODE" = "backtest" ]; then python bot.py --backtest --candles 6000
           elif [ "$MODE" = "amd" ]; then python bot.py --amd --candles 6000
+          elif [ "$MODE" = "smc" ]; then python bot.py --smc --candles 6000
           elif [ "$MODE" = "account" ]; then python bot.py --account \
               --balance "${{ github.event.inputs.balance }}" --margin "${{ github.event.inputs.margin }}" \
               --leverage "${{ github.event.inputs.leverage }}" --days "${{ github.event.inputs.days }}" \

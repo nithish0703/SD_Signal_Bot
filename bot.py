@@ -1199,6 +1199,190 @@ def run_amd_backtest(total):
        + "\n".join(msg_parts) + "\n\nFull tables: GitHub → Actions → run summary.")
 
 
+# ============================ SMC (SWEEP -> MSS -> FVG) ============================
+# 1. Liquidity sweep : price trades below a confirmed swing low, then closes back above it
+# 2. MSS / CHoCH     : a close above the swing high between that low and the sweep (displacement)
+# 3. Entry           : limit order in the FVG created by that displacement (top edge or 50%)
+# 4. SL beyond the sweep extreme; targets: previous high (liquidity), fixed R, trailing.
+SMC_SWEEP_MAX = 48         # sweep must come within 48 candles of the swing low
+SMC_MSS_MAX = 24           # MSS must come within 24 candles of the sweep
+SMC_FILL_MAX = 24          # limit order expires after 24 candles
+SMC_SL_BUFFER_ATR = 0.1
+
+
+def _smc_long(C, H, entry_mode):
+    """Bullish SMC setups in C (use flip() for bearish)."""
+    n = len(C)
+    h = [x["h"] for x in C]; l = [x["l"] for x in C]; cl = [x["c"] for x in C]
+    A = atr(h, l, cl, ATR_LEN)
+    ADX = adx(h, l, cl)
+    CH = chop(h, l, cl)
+    hc = [x["c"] for x in H]
+    he = ema(hc, EMA_LEN)
+    hct = [x["ct"] for x in H]
+    HADX = adx([x["h"] for x in H], [x["l"] for x in H], hc)
+    out, used = [], set()
+    for p, L in pivots(l, PIVOT_LEN, False):
+        # 1. sweep: first candle that trades below the swing low
+        s = next((k for k in range(p + PIVOT_LEN + 1, min(n, p + SMC_SWEEP_MAX)) if l[k] < L), None)
+        if s is None or s in used:
+            continue
+        sweep_low, rec = l[s], None
+        for k in range(s, min(n, s + 3)):                 # reclaim within 3 candles
+            sweep_low = min(sweep_low, l[k])
+            if cl[k] > L:
+                rec = k
+                break
+        if rec is None:
+            continue
+        # 2. MSS: close above the high between the swing low and the sweep
+        level = max(h[p + 1:s])
+        m = None
+        for k in range(rec, min(n, s + SMC_MSS_MAX)):
+            if k > rec and l[k] < sweep_low:
+                break                                     # new low: setup failed
+            if cl[k] > level:
+                m = k
+                break
+        if m is None:
+            continue
+        # 3. FVG inside the displacement leg (latest one up to the MSS candle)
+        fv = next((k for k in range(m, s, -1) if k + 1 < n and l[k + 1] > h[k - 1]), None)
+        if fv is None:
+            continue
+        zb, zt = h[fv - 1], l[fv + 1]
+        entry = zt if entry_mode == "top" else (zb + zt) / 2
+        a = A[m] or A[s]
+        if not a:
+            continue
+        sl = sweep_low - SMC_SL_BUFFER_ATR * a
+        risk = entry - sl
+        if risk <= 0:
+            continue
+        # limit order fill (cancel if price runs 2R away first or the order expires)
+        start = max(m, fv + 1) + 1
+        f = None
+        for k in range(start, min(n, start + SMC_FILL_MAX)):
+            if l[k] <= entry:
+                f = k
+                break
+            if h[k] >= entry + 2 * risk:
+                break
+        if f is None:
+            continue
+        used.add(s)
+        prev_high = max(h[max(0, s - 48):s])              # external liquidity above
+        leg_high = max(h[s:m + 1])
+        kk = bisect.bisect_right(hct, C[f]["ct"]) - 1
+        out.append({
+            "e": f, "entry": entry, "sl": sl, "atr": A[f] or a, "time": C[f]["ct"], "score": 6,
+            "liq": prev_high if prev_high > entry + 0.5 * risk else None,
+            "fill_loss": l[f] <= sl,                      # SL hit in the fill candle: count as a loss
+            "trend": kk >= 0 and he[kk] is not None and hc[kk] > he[kk],
+            "hadx": HADX[kk] if kk >= 0 and HADX[kk] is not None else 0.0,
+            "adx": ADX[f] or 0.0, "chop": CH[f] if CH[f] is not None else 100.0,
+            "discount": entry <= (sweep_low + leg_high) / 2,
+        })
+    return out
+
+
+def find_smc_setups(C, H, entry_mode="top"):
+    longs = [dict(x, side="LONG") for x in _smc_long(C, H, entry_mode)]
+    shorts = []
+    for x in _smc_long(flip(C), flip(H), entry_mode):
+        x = dict(x, side="SHORT", entry=-x["entry"], sl=-x["sl"])
+        x["liq"] = -x["liq"] if x["liq"] is not None else None
+        shorts.append(x)
+    return longs + shorts
+
+
+def _smc(fn):
+    return lambda C, s: -1.0 if s["fill_loss"] else fn(C, s)
+
+
+def _smc_liq(C, s):
+    if s["liq"] is None:
+        return simulate(C, s, s["side"], 2.0)
+    return _simulate_tp(C, s, s["side"], abs(s["liq"] - s["entry"]))
+
+
+SMC_EXITS = [
+    ("Fixed 1.5R", _smc(lambda C, s: simulate(C, s, s["side"], 1.5))),
+    ("Fixed 2R", _smc(lambda C, s: simulate(C, s, s["side"], 2.0))),
+    ("Fixed 3R", _smc(lambda C, s: simulate(C, s, s["side"], 3.0))),
+    ("Prev high/low (liquidity)", _smc(_smc_liq)),
+    ("Trail 3 ATR", _smc(lambda C, s: _simulate_trail(C, s, s["side"], 3.0))),
+]
+SMC_TESTS = [
+    ("No filter", lambda t: True),
+    ("With 4h trend", lambda t: t["trend"]),
+    ("ADX HTF ≥25", lambda t: t["hadx"] >= 25),
+    ("Trend + ADX HTF ≥25", lambda t: t["trend"] and t["hadx"] >= 25),
+    ("Discount (<50% of leg)", lambda t: t["discount"]),
+    ("Trend + discount", lambda t: t["trend"] and t["discount"]),
+    ("CHOP ≤50", lambda t: t["chop"] <= 50),
+]
+
+
+def run_smc_backtest(total):
+    groups = {"top": [], "mid": []}
+    coins = 0
+    for sym in SYMBOLS:
+        try:
+            C, src = fetch_history(sym, TIMEFRAME, total)
+            H, _ = fetch_history(sym, HTF, max(total // 4 + EMA_LEN + 50, 300), source=src)
+        except Exception as e:
+            print("ERROR", e)
+            continue
+        coins += 1
+        for mode in groups:
+            for st in find_smc_setups(C, H, mode):
+                if sl_pct(st) < MIN_SL_PCT:
+                    continue
+                st["slp"], st["sym"] = sl_pct(st), sym
+                st["res"] = {lbl: f(C, st) for lbl, f in SMC_EXITS}
+                groups[mode].append(st)
+        print(f"{sym}: top {sum(1 for t in groups['top'] if t['sym'] == sym)}, "
+              f"mid {sum(1 for t in groups['mid'] if t['sym'] == sym)} setups")
+        time.sleep(0.1)
+
+    head = ("| Exit | Trades | Win% | Avg win | Net/trade (market) | Net/trade (limit) | Total (market) | Max loss streak |\n"
+            "|---|---|---|---|---|---|---|---|\n")
+    names = {"top": "Entry: limit at FVG edge", "mid": "Entry: limit at FVG 50%"}
+    sections, parts = [], []
+    for g, trades in groups.items():
+        rows, ranked = [], []
+        for lbl, _ in SMC_EXITS:
+            n, w, avg, tot, aw, ls = _stats(trades, lbl, FEE_PCT)
+            _, _, avg_l, _, _, _ = _stats(trades, lbl, MAKER_FEE_PCT)
+            rows.append(f"| {lbl} | {n} | {w:.0f}% | {aw:.2f}R | {avg:+.2f}R | {avg_l:+.2f}R | {tot:+.1f}R | {ls} |")
+            if n >= 20:
+                ranked.append((avg, avg_l, lbl, n, w, tot))
+        ftable, consistent = market_filter_table(trades, SMC_TESTS, ("Fixed 2R", "Fixed 3R", "Prev high/low (liquidity)"),
+                                                 title=f"Filters – {names[g]}")
+        sections.append(f"### {names[g]}\n\n" + head + "\n".join(rows) + "\n\n" + ftable)
+        ranked.sort(reverse=True)
+        part = f"\n<b>{names[g]}</b> ({len(trades)} trades)\nTop exits (market / limit fees):\n"
+        part += "\n".join(f"{i}. {lbl}: {avg:+.2f}R / {avl:+.2f}R, win {w:.0f}%, {n} trades"
+                           for i, (avg, avl, lbl, n, w, tot) in enumerate(ranked[:3], 1)) or "not enough trades"
+        part += "\nConsistent filters:\n" + ("\n".join(consistent[:4]) if consistent else "none")
+        parts.append(part)
+
+    report = (f"## SMC backtest: sweep → MSS → FVG (~{total} {TIMEFRAME} candles, {HTF} bias, {coins} coins)\n\n"
+              "Sweep of a confirmed swing low/high, reclaim within 3 candles, MSS = close beyond the swing between them, "
+              "limit entry in the displacement FVG (expires after "
+              f"{SMC_FILL_MAX} candles), SL beyond the sweep. SL ≥{MIN_SL_PCT}%. Net = R per trade after fees "
+              f"(market {FEE_PCT:.2f}%, limit {MAKER_FEE_PCT:.2f}%; entry is a limit order so the limit column is realistic "
+              "if you also exit with limit/TP orders).\n\n" + "\n\n".join(sections) +
+              "\n\n_Slippage and funding are not included. Past results do not guarantee future results._\n")
+    print(report)
+    if os.getenv("GITHUB_STEP_SUMMARY"):
+        with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
+            f.write(report)
+    tg(f"🧠 <b>SMC backtest</b> ({TIMEFRAME}, {HTF} bias, {coins} coins)\n" + "\n".join(parts)
+       + "\n\nFull tables: GitHub → Actions → run summary.")
+
+
 # ============================ ACCOUNT SIMULATION ============================
 
 def _exit_detail(C, s, side, kind, v, sl):
@@ -1378,6 +1562,7 @@ def main():
     ap.add_argument("--candles", type=int, default=5000, help="candles per coin for backtest")
     ap.add_argument("--account", action="store_true", help="simulate a real account over the last N days")
     ap.add_argument("--amd", action="store_true", help="backtest the AMD / Power of 3 model")
+    ap.add_argument("--smc", action="store_true", help="backtest the SMC sweep -> MSS -> FVG model")
     ap.add_argument("--balance", type=float, default=100)
     ap.add_argument("--margin", type=float, default=5)
     ap.add_argument("--leverage", type=int, default=10)
@@ -1397,6 +1582,9 @@ def main():
         sys.exit(0 if ok else 1)
     if args.backtest:
         run_backtest(args.candles)
+        return
+    if args.smc:
+        run_smc_backtest(args.candles)
         return
     if args.amd:
         run_amd_backtest(args.candles)

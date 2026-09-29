@@ -84,6 +84,11 @@ Variable add panninaa adutha run-la irundhu apply aagum. Delete panninaa default
 | `RISK_USD` | `1` | SL hit aana max loss ($). Unga total account-la ~1% vechukkonga |
 | `MAX_LEVERAGE` | `20` | Idha thaandi leverage suggest pannaadhu |
 
+### SMC backtest (sweep → MSS → FVG)
+Actions → Run workflow → mode **smc**. Swing low/high sweep → reclaim → MSS (structure break) → displacement FVG-la
+limit entry (edge / 50%), SL sweep-ku appuram. Exits: 1.5R, 2R, 3R, previous high/low (liquidity), trail 3 ATR.
+`TIMEFRAME` / `HTF` variables-a follow pannum (default 1h / 4h). Backtest mattum; live signals maaraadhu.
+
 ### AMD (Power of 3) backtest
 Actions → Run workflow → mode **amd**. 50 coins, ~250 naal 1h data-la AMD model-a test pannum:
 - **Accumulation:** UTC 00:00–08:00 (IST 5:30 AM–1:30 PM) range, tight-a irukkanum
