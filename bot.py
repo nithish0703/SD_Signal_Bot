@@ -144,7 +144,7 @@ SOURCES = [
     ("spot-vision", "https://data-api.binance.vision/api/v3/klines", 1000),
     ("spot", "https://api.binance.com/api/v3/klines", 1000),
 ]
-SOURCE_LABEL = {"futures": "Binance Futures", "spot-vision": "Binance Spot (same pair)",
+SOURCE_LABEL = {"futures-vision": "Binance Futures (data.binance.vision)", "futures": "Binance Futures", "spot-vision": "Binance Spot (same pair)",
                 "spot": "Binance Spot (same pair)"}
 
 # ============================ DATA ============================
@@ -178,7 +178,81 @@ def fetch_klines(symbol, interval, limit, end_time=None, source=None):
     raise RuntimeError(f"{symbol} {interval}: data fetch failed ({last_err})")
 
 
+DATA_SOURCE = "spot"        # backtests only: "futures" = Binance USDT-M futures candles from data.binance.vision
+FUT_KLINE_URL = "https://data.binance.vision/data/futures/um/{period}/klines/{s}/1h/{s}-1h-{d}.zip"
+_FUT_CACHE = {}
+TF_HOURS = {"1h": 1, "2h": 2, "4h": 4, "6h": 6, "12h": 12, "1d": 24}
+
+
+def _fut_rows(url):
+    try:
+        rows = _zip_rows(url)
+    except Exception:
+        return []
+    out = []
+    for r in rows or []:
+        if not r or not r[0].strip().isdigit():
+            continue                                  # header line
+        t = int(r[0])
+        t = t // 1000 if t > 10 ** 14 else t          # microseconds -> ms
+        out.append({"t": t, "o": float(r[1]), "h": float(r[2]), "l": float(r[3]), "c": float(r[4]),
+                    "v": float(r[5]), "ct": t + 3600000 - 1, "tb": float(r[9]) if len(r) > 9 else None})
+    return out
+
+
+def fetch_futures_1h(fut, hours):
+    """1h USDT-M futures candles for the last `hours` hours (monthly files + daily files for this month).
+    The newest ~1 day is missing (files are published with a delay)."""
+    from concurrent.futures import ThreadPoolExecutor
+    have = _FUT_CACHE.get(fut)
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(hours=hours + 48)
+    if have and have[0]["t"] <= start.timestamp() * 1000:
+        return have
+    urls, m = [], datetime(start.year, start.month, 1, tzinfo=timezone.utc)
+    this_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    while m < this_month:
+        urls.append(FUT_KLINE_URL.format(period="monthly", s=fut, d=m.strftime("%Y-%m")))
+        m = datetime(m.year + (m.month == 12), m.month % 12 + 1, 1, tzinfo=timezone.utc)
+    d = max(this_month, start).date()
+    while d < now.date():
+        urls.append(FUT_KLINE_URL.format(period="daily", s=fut, d=d.isoformat()))
+        d += timedelta(days=1)
+    with ThreadPoolExecutor(8) as ex:
+        parts = list(ex.map(_fut_rows, urls))
+    rows = {x["t"]: x for part in parts for x in part}
+    out = [rows[t] for t in sorted(rows)]
+    if not out:
+        raise RuntimeError(f"{fut}: no futures files on data.binance.vision")
+    _FUT_CACHE[fut] = out
+    return out
+
+
+def _aggregate(c1, hours):
+    """Build N-hour candles (UTC-aligned) from 1h candles."""
+    if hours == 1:
+        return c1
+    ms, out, cur = hours * 3600000, [], None
+    for x in c1:
+        b = x["t"] // ms * ms
+        if cur is None or cur["t"] != b:
+            if cur:
+                out.append(cur)
+            cur = dict(x, t=b, ct=b + ms - 1)
+        else:
+            cur["h"], cur["l"], cur["c"] = max(cur["h"], x["h"]), min(cur["l"], x["l"]), x["c"]
+            cur["v"] += x["v"]
+            cur["tb"] = (cur["tb"] + x["tb"]) if cur.get("tb") is not None and x.get("tb") is not None else None
+    if cur and cur["ct"] < time.time() * 1000:
+        out.append(cur)                                # last bucket only if complete
+    return out
+
+
 def fetch_history(symbol, interval, total, source=None):
+    if DATA_SOURCE == "futures" and interval in TF_HOURS:
+        hrs = TF_HOURS[interval]
+        c1 = fetch_futures_1h(FUTURES_NAME.get(symbol, symbol), total * hrs)
+        return _aggregate(c1, hrs)[-total:], "futures-vision"
     out, end = [], None
     while len(out) < total:
         try:
@@ -1070,39 +1144,36 @@ def entry_name(mode=None):
     return ENTRY_NAMES.get(mode or SMC_ENTRY, mode or SMC_ENTRY)
 
 
-def smc_message(sym, s, source):
-    side = s["side"]
-    buy = side == "LONG"
-    icon = "🟢" if buy else "🔴"
+SHORT_FILTER_NAMES = {
+    "SMC_MIN_RR": "Target ≥1.5R", "SMC_TGT_1R": "Target ≥1R", "SMC_MSS_FAST": "MSS ≤6 candles",
+    "SMC_MSS_FAST4": "MSS ≤4 candles", "SMC_LDN_NY": "London+NY time", "SMC_KILLZONE": "ICT killzone",
+    "SMC_NO_WEEKEND": "No weekend", "SMC_MAX_SL": "SL ≤4%", "SMC_MIN_SL": "SL ≥1.5%", "SMC_BTC": "BTC trend",
+    "SMC_MIDNIGHT": "NY midnight open", "SMC_MAX_DEPTH": "Sweep ≤1 ATR", "SMC_VOL_BAND": "Normal volatility",
+    "SMC_NO_LATE_US": "No late-US", "SMC_NO_ASIA": "No Asia", "SMC_ABSORB": "Seller absorption",
+}
+
+
+def smc_message(sym, s, source, fl=None):
+    """Short signal: futures-ready prices when fl (futures_levels) is given, else spot prices."""
+    if fl:
+        s = dict(s, entry=fl["entry"], sl=fl["sl"], tp=fl["tp"], cancel=fl["cancel"])
+    buy = s["side"] == "LONG"
     risk = abs(s["entry"] - s["sl"])
     tp_r = abs(s["tp"] - s["entry"]) / risk
-    tp_what = "previous high (liquidity)" if buy else "previous low (liquidity)"
-    if s["liq"] is None:
-        tp_what = "2R (no clear liquidity)"
-    until = datetime.fromtimestamp(s["expires_ct"] / 1000, IST).strftime("%d %b %I:%M %p IST")
-    opts = [sizing(s, side, m) for m in MARGIN_OPTIONS]
-    z = opts[0]
-    checks = [("Liquidity sweep", True), ("Market structure shift", True), (f"Entry: {entry_name()}", True),
-              ("Discount" if buy else "Premium", s["discount"]), (f"{HTF} trend agrees", s["trend"])]
+    until = datetime.fromtimestamp(s["expires_ct"] / 1000, IST).strftime("%d %b, %I:%M %p IST")
+    opts = [sizing(s, s["side"], m) for m in MARGIN_OPTIONS]
+    pair = (sym[:-4] + "/USDT") if sym.endswith("USDT") else sym
     return (
-        f"📌 {icon} <b>SMC LIMIT {'BUY' if buy else 'SELL'} {sym}</b>  ({TIMEFRAME})\n"
-        + (f"⚠️ On Futures this is <b>{FUTURES_NAME[sym]}</b> (price ×1000)\n" if sym in FUTURES_NAME else "")
-        + f"\nLimit entry: <code>{fp(s['entry'])}</code>\n"
-        f"Stop Loss: <code>{fp(s['sl'])}</code> ({pct(s['entry'], s['sl'])})\n"
-        f"Take Profit: <code>{fp(s['tp'])}</code> ({tp_r:.1f}R, {tp_what})\n\n"
-        f"⏳ Valid until {until}. Cancel it if price reaches <code>{fp(s['cancel'])}</code> before filling.\n\n"
-        f"💰 <b>Your trade (Isolated)</b>\n"
-        + "".join(f"${o['margin']:g} margin → <b>{o['lev']}x</b> (position ${o['pos']:.0f}, "
-                  f"SL loss −${o['loss']:.2f}, liq ≈ <code>{fp(o['liq'])}</code>)\n" for o in opts)
-        + f"Profit at TP ≈ +${z['loss'] * tp_r:.2f}\n"
-        + f"💸 Fees ~${z['fee']:.2f} ({fee_r(s):.2f}R).\n\n"
-        + "\n".join(f"{'✅' if v else '❌'} {k}" for k, v in checks) + "\n"
-        f"📐 ADX {HTF} {s.get('hadx', 0):.0f} | CHOP {s.get('chop', 0):.0f} | "
-        f"displacement {s.get('disp', 0):.1f} ATR | target {s.get('tgt_r', 0):.1f}R\n"
-        + (f"🔍 Quality filters passed: {smc_quality_txt()}\n" if SMC_ACTIVE else "") + "\n"
-        f"🤖 I'll tell you when it fills, gets cancelled, or hits TP / SL.\n"
-        f"📊 {SOURCE_LABEL.get(source, source)}\n"
-        f"<i>Manual trade only. Check the chart first. Not financial advice.</i>"
+        f"{'🟢' if buy else '🔴'} <b>{pair} — LIMIT {'BUY' if buy else 'SELL'}</b> | {TIMEFRAME.upper()}\n"
+        + (f"⚠️ Futures symbol: <b>{FUTURES_NAME[sym]}</b>\n" if sym in FUTURES_NAME else "")
+        + f"🕒 {datetime.now(IST).strftime('%d %b %Y, %I:%M %p IST')}\n"
+        f"📍 Entry: <code>{fp(s['entry'])}</code>\n"
+        f"🛑 SL: <code>{fp(s['sl'])}</code> ({(s['sl'] - s['entry']) / s['entry'] * 100:+.2f}%)\n"
+        f"🎯 TP: <code>{fp(s['tp'])}</code> ({(s['tp'] - s['entry']) / s['entry'] * 100:+.2f}%, {tp_r:.1f}R)\n\n"
+        + "".join(f"💰 ${o['margin']:g} ({o['lev']}x) → SL −${o['loss']:.2f} | TP +${o['loss'] * tp_r:.2f}\n" for o in opts)
+        + f"\n⏳ Valid: {until}\n"
+        f"🚫 Cancel if price → <code>{fp(s['cancel'])}</code> before fill"
+        + ("" if fl else "\n(spot prices – futures data not available)")
     )
 
 
@@ -1155,8 +1226,13 @@ def manage_smc(st, key, tr, candles):
     name = f"{icon} <b>SMC {tr['side']} {tr['sym']}</b> ({tr['tf']})"
     for ev in update_smc(tr, candles):
         if ev[0] == "filled":
-            tg(f"✅ {name}: limit order <b>filled</b> at <code>{fp(ev[1])}</code>\n"
-               f"SL <code>{fp(tr['sl'])}</code> | TP <code>{fp(tr['tp'])}</code> – make sure both are set.")
+            fu = tr.get("fut")
+            if fu:
+                tg(f"✅ {name}: limit order <b>filled</b> at <code>{fp(fu['entry'])}</code>\n"
+                   f"SL <code>{fp(fu['sl'])}</code> | TP <code>{fp(fu['tp'])}</code> (futures) – make sure both are set.")
+            else:
+                tg(f"✅ {name}: limit order <b>filled</b> at <code>{fp(ev[1])}</code>\n"
+                   f"SL <code>{fp(tr['sl'])}</code> | TP <code>{fp(tr['tp'])}</code> – make sure both are set.")
         elif ev[0] == "be":
             tg(f"🛡 {name}: price reached +{SMC_BE:g}R – <b>move SL to breakeven</b> "
                f"<code>{fp(ev[1])}</code> (entry + fees). Loss is no longer possible.")
@@ -1171,7 +1247,8 @@ def manage_smc(st, key, tr, candles):
             net = r - tr["fee_r"]
             usd = net * tr.get("usd_r", RISK_USD)
             what = "🎯 TP hit" if r > 0.3 else ("⚖️ breakeven" if tr.get("be") and r > -0.1 else "🛑 SL hit")
-            tg(f"🏁 {name} closed at <code>{fp(ev[1])}</code> – {what}\n"
+            px = ev[1] * tr["fut"]["ratio"] if tr.get("fut") else ev[1]
+            tg(f"🏁 {name} closed at <code>{fp(px)}</code> – {what}\n"
                f"Result: <b>{r:+.2f}R</b> (after fees ~{net:+.2f}R ≈ <b>{'+' if usd >= 0 else '−'}${abs(usd):.2f}</b>)")
             st["closed"].append({"sym": tr["sym"], "side": tr["side"], "tf": tr["tf"], "strategy": "smc",
                                  "r": round(r, 3), "net": round(net, 3), "simple": round(net, 3),
@@ -1207,6 +1284,57 @@ def live_bar_ok(st, sig_ct):
     return n < SMC_ACTIVE["SMC_MAX_PER_BAR"]
 
 
+_BASIS_CACHE = {}
+
+
+def futures_basis(sym, C):
+    """Compare Binance futures 1h candles (data.binance.vision, last 2 published days) with our spot candles.
+    Returns {ratio, basis_pct, buf_long, buf_short, day} or None.
+    ratio  = futures close / spot close (median; ~1000 for 1000-prefix coins)
+    buf_*  = extra wick room for the SL: 90th percentile of how much further futures wicks went (min 0.1%, max 0.5%)."""
+    if sym in _BASIS_CACHE:
+        return _BASIS_CACHE[sym]
+    fut = FUTURES_NAME.get(sym, sym)
+    spot = {x["t"]: x for x in C}
+    rows = []
+    today = datetime.now(timezone.utc).date()
+    day = None
+    for lag in (1, 2, 3):
+        d = (today - timedelta(days=lag)).isoformat()
+        got = _fut_rows(FUT_KLINE_URL.format(period="daily", s=fut, d=d))
+        got = [f for f in got if f["t"] in spot]
+        if got:
+            rows += got
+            day = day or d
+        if len(rows) >= 36:
+            break
+    if len(rows) < 12:
+        _BASIS_CACHE[sym] = None
+        return None
+    ratios = sorted(f["c"] / spot[f["t"]]["c"] for f in rows if spot[f["t"]]["c"])
+    ratio = ratios[len(ratios) // 2]
+    below = sorted(max(0.0, (spot[f["t"]]["l"] * ratio - f["l"]) / f["l"]) for f in rows)
+    above = sorted(max(0.0, (f["h"] - spot[f["t"]]["h"] * ratio) / f["h"]) for f in rows)
+    p90 = lambda v: v[int(len(v) * 0.9) - 1] if v else 0.0
+    unit = 1000 if ratio > 500 else 1
+    res = {"ratio": ratio, "basis_pct": (ratio / unit - 1) * 100, "day": day, "unit": unit,
+           "buf_long": min(max(p90(below), 0.001), 0.005), "buf_short": min(max(p90(above), 0.001), 0.005)}
+    _BASIS_CACHE[sym] = res
+    return res
+
+
+def futures_levels(sym, x, C):
+    """Signal levels converted to the futures chart: entry/TP/cancel x basis, SL x basis + extra wick room."""
+    b = futures_basis(sym, C)
+    if not b:
+        return None
+    r, buy = b["ratio"], x["side"] == "LONG"
+    buf = b["buf_long"] if buy else b["buf_short"]
+    sl = x["sl"] * r * ((1 - buf) if buy else (1 + buf))
+    return {"entry": x["entry"] * r, "sl": sl, "tp": x["tp"] * r, "cancel": x["cancel"] * r,
+            "basis_pct": b["basis_pct"], "buf_pct": buf * 100, "day": b["day"], "ratio": r}
+
+
 def scan_smc(st, sym, C, H, src, btc_fn=None):
     sent = 0
     n = len(C)
@@ -1221,9 +1349,16 @@ def scan_smc(st, sym, C, H, src, btc_fn=None):
         key = f"{sym}|{x['side']}|smc|{TIMEFRAME}|{x['sweep_t']}"
         if key in st["sent"]:
             continue
-        if tg(smc_message(sym, x, src)):
+        try:
+            fl = futures_levels(sym, x, C)
+        except Exception as e:
+            print("futures levels error", sym, e)
+            fl = None
+        if tg(smc_message(sym, x, src, fl)):
             st["sent"][key] = int(time.time())
             open_smc_trade(st, key, sym, x, src, C)
+            if fl:
+                st["open"][key]["fut"] = {k: fl[k] for k in ("entry", "sl", "tp", "ratio")}
             sent += 1
     return sent
 
@@ -2252,7 +2387,7 @@ def run_smc_backtest(total):
         part += "\nConsistent filters:\n" + ("\n".join(consistent[:4]) if consistent else "none")
         parts.append(part)
 
-    report = (f"## SMC backtest: sweep → MSS → FVG (~{total} {TIMEFRAME} candles, {HTF} bias, {coins} coins)\n\n"
+    report = (f"## SMC backtest: sweep → MSS → FVG (~{total} {TIMEFRAME} candles, {HTF} bias, {coins} coins, {DATA_SOURCE.upper()} data)\n\n"
               "Sweep of a confirmed swing low/high, reclaim within 3 candles, MSS = close beyond the swing between them, "
               "limit entry in the displacement FVG (expires after "
               f"{SMC_FILL_MAX} candles), SL beyond the sweep. SL ≥{MIN_SL_PCT}%. Net = R per trade after fees "
@@ -2268,7 +2403,7 @@ def run_smc_backtest(total):
     if os.getenv("GITHUB_STEP_SUMMARY"):
         with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
             f.write("\n" + qtable)
-    tg(f"🧠 <b>SMC backtest</b> ({TIMEFRAME}, {HTF} bias, {coins} coins)\n" + "\n".join(parts) + "\n" + qmsg
+    tg(f"🧠 <b>SMC backtest</b> ({TIMEFRAME}, {HTF} bias, {coins} coins, <b>{DATA_SOURCE.upper()} data</b>)\n" + "\n".join(parts) + "\n" + qmsg
        + "\n\nFull tables: GitHub → Actions → run summary.")
 
 
@@ -2571,7 +2706,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                  f", quality: {smc_quality_txt()})"
                  if strategy == "smc" else "S&D")
     how += f" | strategy {strat_txt}, filters: {active_filters()}"
-    head = (f"## Account simulation: ${balance:g} start, {how}, last {days} days\n\n"
+    head = (f"## Account simulation ({DATA_SOURCE.upper()} data): ${balance:g} start, {how}, last {days} days\n\n"
             f"{TIMEFRAME} chart, {HTF} trend, score ≥{MIN_SCORE}, SL ≥{MIN_SL_PCT}%, {coins} futures coins, "
             f"fees {FEE_PCT:.2f}% round trip. One position per coin; a trade is skipped if free balance < ${margin:g}.\n\n"
             "| Exit | Final balance | Return | Trades | Win% | Max drawdown | Loss streak | Best / worst trade | Fees paid |\n"
@@ -2590,7 +2725,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
             f.write(report)
 
     msg = (f"💼 <b>Account backtest</b> (last {days} days)\n"
-           f"${balance:g} start, {how}\n{coins} coins, {TIMEFRAME}\n")
+           f"${balance:g} start, {how}\n{coins} coins, {TIMEFRAME}, <b>{DATA_SOURCE.upper()} data</b>\n")
     for r in results:
         ret = (r["final"] / balance - 1) * 100
         msg += (f"\n<b>{r['lbl']}</b>: ${balance:g} → <b>${r['final']:.2f}</b> ({ret:+.1f}%)\n"
@@ -2626,7 +2761,12 @@ def main():
     ap.add_argument("--top-n", type=int, default=0, help="account/backtest: number of top futures coins")
     ap.add_argument("--entry", choices=["default", "mid", "top", "ote", "ob", ""], default="",
                     help="smc/account: entry model to test (mid = FVG 50%%, top = FVG edge, ote = ICT OTE, ob = order block)")
+    ap.add_argument("--data", choices=["spot", "futures"], default="spot",
+                    help="smc/account backtests: candle source (futures = USDT-M futures files from data.binance.vision)")
     args = ap.parse_args()
+    if args.data == "futures" and (args.account or args.smc):
+        global DATA_SOURCE
+        DATA_SOURCE = "futures"
     if args.entry not in ("", "default") and (args.account or args.smc):
         global SMC_ENTRY
         SMC_ENTRY = args.entry
