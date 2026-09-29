@@ -38,6 +38,11 @@ on:
         type: choice
         options: [smc, sd]
         default: smc
+      entry:
+        description: "smc / account mode: entry model (default = what smc_filters.json says, mid = FVG 50%, top = FVG edge, ote = ICT OTE 70.5%, ob = ICT order block)"
+        type: choice
+        options: [default, mid, top, ote, ob]
+        default: default
 
 permissions:
   contents: write
@@ -117,6 +122,11 @@ jobs:
           SMC_NO_ASIA: ${{ vars.SMC_NO_ASIA }}
           SMC_NO_LATE_US: ${{ vars.SMC_NO_LATE_US }}
           SMC_LDN_NY: ${{ vars.SMC_LDN_NY }}
+          SMC_KILLZONE: ${{ vars.SMC_KILLZONE }}
+          SMC_PDL: ${{ vars.SMC_PDL }}
+          SMC_MIDNIGHT: ${{ vars.SMC_MIDNIGHT }}
+          SMC_OTE_FVG: ${{ vars.SMC_OTE_FVG }}
+          SMC_HAS_OB: ${{ vars.SMC_HAS_OB }}
           FILTER_HTF_ADX: ${{ vars.FILTER_HTF_ADX }}
           FILTER_ADX: ${{ vars.FILTER_ADX }}
           FILTER_CHOP: ${{ vars.FILTER_CHOP }}
@@ -126,12 +136,13 @@ jobs:
           if [ "$MODE" = "test" ]; then python bot.py --test
           elif [ "$MODE" = "backtest" ]; then python bot.py --backtest --candles 6000
           elif [ "$MODE" = "amd" ]; then python bot.py --amd --candles 6000
-          elif [ "$MODE" = "smc" ]; then python bot.py --smc --candles 6000 --top-n "${{ github.event.inputs.coins }}"
+          elif [ "$MODE" = "smc" ]; then python bot.py --smc --candles 6000 --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
           elif [ "$MODE" = "account" ]; then python bot.py --account \
               --balance "${{ github.event.inputs.balance }}" --margin "${{ github.event.inputs.margin }}" \
               --leverage "${{ github.event.inputs.leverage }}" --days "${{ github.event.inputs.days }}" \
               --sizing "${{ github.event.inputs.sizing }}" --risk "${{ github.event.inputs.risk }}" \
-              --strategy "${{ github.event.inputs.strategy }}" --top-n "${{ github.event.inputs.coins }}"
+              --strategy "${{ github.event.inputs.strategy }}" --top-n "${{ github.event.inputs.coins }}" \
+              --entry "${{ github.event.inputs.entry }}"
           else python bot.py
           fi
 

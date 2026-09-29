@@ -1063,6 +1063,13 @@ def smc_ok(x):
     return sl_pct(x) >= MIN_SL_PCT and passes_filters(x) and smc_quality_ok(x)
 
 
+ENTRY_NAMES = {"mid": "FVG 50%", "top": "FVG edge", "ote": "ICT OTE 70.5%", "ob": "ICT order block 50%"}
+
+
+def entry_name(mode=None):
+    return ENTRY_NAMES.get(mode or SMC_ENTRY, mode or SMC_ENTRY)
+
+
 def smc_message(sym, s, source):
     side = s["side"]
     buy = side == "LONG"
@@ -1075,7 +1082,7 @@ def smc_message(sym, s, source):
     until = datetime.fromtimestamp(s["expires_ct"] / 1000, IST).strftime("%d %b %I:%M %p IST")
     opts = [sizing(s, side, m) for m in MARGIN_OPTIONS]
     z = opts[0]
-    checks = [("Liquidity sweep", True), ("Market structure shift", True), ("FVG entry (50%)" if SMC_ENTRY == "mid" else "FVG entry (edge)", True),
+    checks = [("Liquidity sweep", True), ("Market structure shift", True), (f"Entry: {entry_name()}", True),
               ("Discount" if buy else "Premium", s["discount"]), (f"{HTF} trend agrees", s["trend"])]
     return (
         f"📌 {icon} <b>SMC LIMIT {'BUY' if buy else 'SELL'} {sym}</b>  ({TIMEFRAME})\n"
@@ -1683,6 +1690,11 @@ def _smc_long(C, H, entry_mode, pending=False):
     HA = atr([x["h"] for x in H], hl, hc, ATR_LEN)
     hpl = pivots(hl, PIVOT_LEN, False)                    # 4h swing lows (for the HTF POI check)
     lows = pivots(l, PIVOT_LEN, False)
+    dlow = {}                                             # UTC day -> lowest low (previous-day liquidity)
+    for x in C:
+        dd = x["t"] // 86400000
+        dlow[dd] = min(dlow.get(dd, x["l"]), x["l"])
+    t_idx = {x["t"]: i for i, x in enumerate(C)}
     out, used = [], set()
     for p, L in lows:
         # 1. sweep: first candle that trades below the swing low
@@ -1713,7 +1725,20 @@ def _smc_long(C, H, entry_mode, pending=False):
         if fv is None:
             continue
         zb, zt = h[fv - 1], l[fv + 1]
-        entry = zt if entry_mode == "top" else (zb + zt) / 2
+        leg_high = max(h[s:m + 1])
+        rng_leg = leg_high - sweep_low
+        ote_lo, ote_hi = leg_high - 0.79 * rng_leg, leg_high - 0.62 * rng_leg   # ICT OTE zone (62-79%)
+        ob = next((k for k in range(m - 1, s - 1, -1) if cl[k] < o[k]), None)  # last down candle before MSS
+        if entry_mode == "top":
+            entry = zt
+        elif entry_mode == "ote":
+            entry = leg_high - 0.705 * rng_leg
+        elif entry_mode == "ob":
+            if ob is None:
+                continue
+            entry = (o[ob] + cl[ob]) / 2                  # order block mean threshold (body 50%)
+        else:
+            entry = (zb + zt) / 2
         a = A[m] or A[s]
         if not a:
             continue
@@ -1732,7 +1757,6 @@ def _smc_long(C, H, entry_mode, pending=False):
                 cancelled = True
                 break
         prev_high = max(h[max(0, s - 48):s])              # external liquidity above
-        leg_high = max(h[s:m + 1])
         # ---- quality features (all known at signal time)
         q = {
             "disp": abs(cl[m] - o[m]) / a,                               # MSS candle body in ATRs
@@ -1759,6 +1783,19 @@ def _smc_long(C, H, entry_mode, pending=False):
         q["mss_buy"] = (tbv[m] / vol[m]) if vol[m] > 0 and tbv[m] is not None else None
         q["sweep_hour"] = (C[s]["t"] // 3600000) % 24
         q["sig_hour"] = (C[sg]["t"] // 3600000) % 24                     # hour the signal is sent (UTC)
+        # ---- ICT features
+        pdl = dlow.get(C[s]["t"] // 86400000 - 1)
+        q["pdl"] = pdl is not None and sweep_low < pdl < cl[rec]         # took previous day's low and reclaimed it
+        q["killzone"] = q["sweep_hour"] in (6, 7, 8, 12, 13, 14)          # London 02-05 / NY AM 08-11 New York time
+        mon = datetime.fromtimestamp(C[sg]["t"] / 1000, timezone.utc).month
+        mh = 4 if 3 <= mon <= 10 else 5                                  # New York midnight in UTC (EDT / EST)
+        mt = (C[sg]["t"] // 86400000) * 86400000 + mh * 3600000
+        if C[sg]["t"] < mt:
+            mt -= 86400000
+        mi = t_idx.get(mt)
+        q["below_mo"] = mi is None or entry < o[mi]                      # long below NY midnight open = discount of the day
+        q["ote_fvg"] = zb <= ote_hi and zt >= ote_lo                     # FVG sits inside the OTE zone
+        q["has_ob"] = ob is not None
         q["weekend"] = datetime.fromtimestamp(C[sg]["ct"] / 1000, timezone.utc).weekday() >= 5
         win = [v2 for v2 in atrp[max(0, sg - 720):sg + 1] if v2 is not None]   # ~30 days of 1h
         q["atr_pct"] = (sum(1 for v2 in win if v2 <= atrp[sg]) / len(win) * 100) if win and atrp[sg] else 50.0
@@ -1887,6 +1924,12 @@ SMC_QUALITY = [
     ("Session: no Asia signals (00–07 UTC)", "SMC_NO_ASIA", 1, lambda t, v: not 0 <= t.get("sig_hour", 12) < 7),
     ("Session: no late-US signals (20–24 UTC)", "SMC_NO_LATE_US", 1, lambda t, v: not 20 <= t.get("sig_hour", 12) < 24),
     ("Session: London+NY only (07–20 UTC signal)", "SMC_LDN_NY", 1, lambda t, v: 7 <= t.get("sig_hour", 12) < 20),
+    ("ICT: sweep in a killzone (London 02–05 / NY 08–11 New York time)", "SMC_KILLZONE", 1,
+     lambda t, v: t.get("killzone", True)),
+    ("ICT: sweep took previous day's low/high", "SMC_PDL", 1, lambda t, v: t.get("pdl", True)),
+    ("ICT: entry below NY midnight open (long) / above (short)", "SMC_MIDNIGHT", 1, lambda t, v: t.get("below_mo", True)),
+    ("ICT: FVG inside the OTE zone (62–79%)", "SMC_OTE_FVG", 1, lambda t, v: t.get("ote_fvg", True)),
+    ("ICT: order block present before MSS", "SMC_HAS_OB", 1, lambda t, v: t.get("has_ob", True)),
     ("Liquidity: no weekend signals", "SMC_NO_WEEKEND", 1, lambda t, v: not t.get("weekend", False)),
     ("Volatility: ATR% normal (20–80th pct of 30d)", "SMC_VOL_BAND", 1, lambda t, v: 20 <= t.get("atr_pct", 50) <= 80),
     ("Risk: SL ≤4% (stop not too wide)", "SMC_MAX_SL", 4, lambda t, v: sl_pct(t) <= v),
@@ -1972,6 +2015,21 @@ def load_smc_be():
 
 
 SMC_BE = load_smc_be()
+
+
+def load_smc_entry():
+    """Entry mode the filters were validated with (smc_filters.json); repo variable SMC_ENTRY wins."""
+    if os.getenv("SMC_ENTRY", "").strip():
+        return SMC_ENTRY
+    try:
+        with open(SMC_FILTERS_FILE) as f:
+            e = json.load(f).get("entry")
+        return e if e in ("mid", "top", "ote", "ob") else SMC_ENTRY
+    except Exception:
+        return SMC_ENTRY
+
+
+SMC_ENTRY = load_smc_entry()
 
 
 def smc_quality_ok(x, active=None):
@@ -2109,7 +2167,7 @@ def validate_quality(trades):
     be_on = bev[0] >= 60 and bev[2] >= 20 and bev[1] >= cur[1] + 0.01 and bev[3] > cur[3] and bev[3] > 0
     be_line = (f"Breakeven at 1R: train {bev[1]:+.2f}R, test {bev[3]:+.2f}R vs without "
                f"{cur[1]:+.2f}R / {cur[3]:+.2f}R → {'✅ applied' if be_on else '❌ not applied'}")
-    result = {"filters": combo, "be": 1.0 if be_on else 0.0, "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+    result = {"filters": combo, "entry": SMC_ENTRY, "be": 1.0 if be_on else 0.0, "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
               "exit": ex, "baseline": {"train": [bn, round(bavg, 3)], "test": [btn, round(btavg, 3)]},
               "with_filters": {"train": [cur[0], round(cur[1], 3)], "test": [cur[2], round(cur[3], 3)]}}
     with open(SMC_FILTERS_FILE, "w") as f:
@@ -2117,7 +2175,7 @@ def validate_quality(trades):
 
     names = smc_quality_txt(combo)
     table = ("### Quality filters: train / test validation\n\n"
-             f"Baseline = live setup ({'discount' if SMC_REQUIRE_DISCOUNT else 'no discount'}), exit = {ex}, market fees. "
+             f"Entry = {entry_name()}. Baseline = live setup ({'discount' if SMC_REQUIRE_DISCOUNT else 'no discount'}), exit = {ex}, market fees. "
              "Train = before the last 60 days, test = last 60 days. Cells = trades / net R per trade.\n\n"
              f"| Filter | Train | Test | Removed trades | Passed |\n|---|---|---|---|---|\n"
              f"| **Baseline (no quality filter)** | {bn} / {bavg:+.2f}R | {btn} / {btavg:+.2f}R | | |\n"
@@ -2131,7 +2189,7 @@ def validate_quality(trades):
              "\n### By session (signal hour, UTC) – where the false signals come from\n\n"
              "| Session | Baseline train | Baseline test | Live filters train | Live filters test | Live win% |\n"
              "|---|---|---|---|---|---|\n" + "\n".join(srows) + "\n")
-    msg = (f"\n<b>Quality filters (train → last 60 days test)</b>\n"
+    msg = (f"\n<b>Quality filters (train → last 60 days test), entry: {entry_name()}</b>\n"
            f"Baseline: train {bavg:+.2f}R ({bn}), test {btavg:+.2f}R ({btn})\n"
            + ("Passed: " + ", ".join(p[1] for p in passed) if passed else "Passed: none") + "\n"
            f"✅ <b>Applied to live:</b> {names}\n"
@@ -2144,7 +2202,7 @@ def validate_quality(trades):
 
 
 def run_smc_backtest(total):
-    groups = {"top": [], "mid": []}
+    groups = {"top": [], "mid": [], "ote": [], "ob": []}
     coins = 0
     try:
         HB, _ = fetch_history("BTCUSDT", HTF, max(total // 4 + EMA_LEN + 50, 300))
@@ -2169,13 +2227,12 @@ def run_smc_backtest(total):
                 _, ci = _exit_detail(C, st, st["side"], "price", None, st["sl"])
                 st["close_ct"] = C[ci]["ct"] if ci is not None else None
                 groups[mode].append(st)
-        print(f"{sym}: top {sum(1 for t in groups['top'] if t['sym'] == sym)}, "
-              f"mid {sum(1 for t in groups['mid'] if t['sym'] == sym)} setups")
+        print(f"{sym}: " + ", ".join(f"{g} {sum(1 for t in groups[g] if t['sym'] == sym)}" for g in groups) + " setups")
         time.sleep(0.1)
 
     head = ("| Exit | Trades | Win% | Avg win | Net/trade (market) | Net/trade (limit) | Total (market) | Max loss streak |\n"
             "|---|---|---|---|---|---|---|---|\n")
-    names = {"top": "Entry: limit at FVG edge", "mid": "Entry: limit at FVG 50%"}
+    names = {g: "Entry: " + entry_name(g) for g in groups}
     sections, parts = [], []
     for g, trades in groups.items():
         rows, ranked = [], []
@@ -2509,7 +2566,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     levs = [c["lev"] for c in cands] or [leverage]
     how = (f"${margin:g} margin, ~${risk:g} loss at SL, leverage {min(levs)}–{max(levs)}x (per trade)"
            if mode == "risk" else f"${margin:g} × {leverage}x per trade (position ${pos:g})")
-    strat_txt = (f"SMC (FVG {'50%' if SMC_ENTRY == 'mid' else 'edge'}"
+    strat_txt = (f"SMC ({entry_name()}"
                  f"{', discount' if SMC_REQUIRE_DISCOUNT else ''}{', 4h trend' if SMC_REQUIRE_TREND else ''}"
                  f", quality: {smc_quality_txt()})"
                  if strategy == "smc" else "S&D")
@@ -2567,7 +2624,12 @@ def main():
     ap.add_argument("--risk", type=float, default=1.0, help="$ loss at SL in risk sizing")
     ap.add_argument("--strategy", choices=["smc", "sd", ""], default="", help="account mode strategy")
     ap.add_argument("--top-n", type=int, default=0, help="account/backtest: number of top futures coins")
+    ap.add_argument("--entry", choices=["default", "mid", "top", "ote", "ob", ""], default="",
+                    help="smc/account: entry model to test (mid = FVG 50%%, top = FVG edge, ote = ICT OTE, ob = order block)")
     args = ap.parse_args()
+    if args.entry not in ("", "default") and (args.account or args.smc):
+        global SMC_ENTRY
+        SMC_ENTRY = args.entry
     if args.top_n > 0 and (args.account or args.smc or args.backtest or args.amd):
         global TOP_N
         TOP_N = min(args.top_n, 150)                      # only for backtests; live scan keeps its setting
@@ -2578,7 +2640,7 @@ def main():
                 f"Timeframe: {TIMEFRAME} (trend: {HTF}), min grade: {MIN_SCORE}/6\n"
                 f"Min SL: {MIN_SL_PCT}%, fees assumed: {FEE_PCT:.2f}%\n"
                 f"Strategy: {STRATEGY.upper()}"
-                + (f" (SMC: FVG {'50%' if SMC_ENTRY == 'mid' else 'edge'}, discount {'on' if SMC_REQUIRE_DISCOUNT else 'off'}, "
+                + (f" (SMC: {entry_name()}, discount {'on' if SMC_REQUIRE_DISCOUNT else 'off'}, "
                    f"trend {'on' if SMC_REQUIRE_TREND else 'off'}, TP = liquidity)" if STRATEGY != "sd" else "") + "\n"
                 f"Filters: {active_filters()}\n"
                 + (f"SMC quality filters (validated): {smc_quality_txt()}\n" if STRATEGY != "sd" else "")
