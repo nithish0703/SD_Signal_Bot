@@ -30,6 +30,11 @@ on:
       risk:
         description: "account mode (risk sizing): $ loss if SL is hit"
         default: "1"
+      strategy:
+        description: "account mode: strategy to simulate"
+        type: choice
+        options: [smc, sd]
+        default: smc
 
 permissions:
   contents: write
@@ -67,6 +72,10 @@ jobs:
           MARGIN_USD: ${{ vars.MARGIN_USD }}
           RISK_USD: ${{ vars.RISK_USD }}
           MAX_LEVERAGE: ${{ vars.MAX_LEVERAGE }}
+          STRATEGY: ${{ vars.STRATEGY }}
+          SMC_ENTRY: ${{ vars.SMC_ENTRY }}
+          SMC_REQUIRE_DISCOUNT: ${{ vars.SMC_REQUIRE_DISCOUNT }}
+          SMC_REQUIRE_TREND: ${{ vars.SMC_REQUIRE_TREND }}
           FILTER_HTF_ADX: ${{ vars.FILTER_HTF_ADX }}
           FILTER_ADX: ${{ vars.FILTER_ADX }}
           FILTER_CHOP: ${{ vars.FILTER_CHOP }}
@@ -80,7 +89,8 @@ jobs:
           elif [ "$MODE" = "account" ]; then python bot.py --account \
               --balance "${{ github.event.inputs.balance }}" --margin "${{ github.event.inputs.margin }}" \
               --leverage "${{ github.event.inputs.leverage }}" --days "${{ github.event.inputs.days }}" \
-              --sizing "${{ github.event.inputs.sizing }}" --risk "${{ github.event.inputs.risk }}"
+              --sizing "${{ github.event.inputs.sizing }}" --risk "${{ github.event.inputs.risk }}" \
+              --strategy "${{ github.event.inputs.strategy }}"
           else python bot.py
           fi
 

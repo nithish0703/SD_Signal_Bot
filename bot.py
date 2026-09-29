@@ -62,6 +62,11 @@ SIGNAL_LOOKBACK = 3        # only signal if confirmation candle is among last 3 
 MIN_SCORE = 5              # 6 keys score needed to send a signal (6 = A+, 5 = A)
 SL_BUFFER_ATR = 0.1        # stop loss buffer below/above the zone
 MIN_SL_PCT = 1.0           # skip trades whose stop is closer than 1% (fees would eat the profit)
+STRATEGY = "smc"           # live signals: "smc" (best in backtest), "sd" (supply & demand) or "both"
+SMC_ENTRY = "mid"          # SMC limit entry: "mid" = 50% of the FVG (best), "top" = FVG edge
+SMC_REQUIRE_DISCOUNT = True  # only buy in discount / sell in premium (consistent in backtest)
+SMC_REQUIRE_TREND = False  # also require the 4h trend to agree
+
 # Market-regime filters (0 = off). Turn on only what the backtest shows is consistently better.
 FILTER_HTF_ADX = 0         # e.g. 20: skip signals when higher-TF ADX is below this (no trend)
 FILTER_ADX = 0             # e.g. 20: same on the entry timeframe
@@ -105,6 +110,14 @@ MIN_SCORE = max(1, min(6, _env_num("MIN_SCORE", MIN_SCORE, int)))
 MIN_SL_PCT = _env_num("MIN_SL_PCT", MIN_SL_PCT)
 FEE_PCT = _env_num("FEE_PCT", FEE_PCT)
 TRAIL_ATR = _env_num("TRAIL_ATR", TRAIL_ATR)
+STRATEGY = (os.getenv("STRATEGY", "").strip().lower() or STRATEGY)
+if STRATEGY not in ("smc", "sd", "both"):
+    print(f"Unknown STRATEGY={STRATEGY!r}, using smc")
+    STRATEGY = "smc"
+SMC_ENTRY = (os.getenv("SMC_ENTRY", "").strip().lower() or SMC_ENTRY)
+SMC_REQUIRE_TREND = os.getenv("SMC_REQUIRE_TREND", "").strip().lower() in ("1", "true", "yes") or SMC_REQUIRE_TREND
+if os.getenv("SMC_REQUIRE_DISCOUNT", "").strip().lower() in ("0", "false", "no"):
+    SMC_REQUIRE_DISCOUNT = False
 FILTER_HTF_ADX = _env_num("FILTER_HTF_ADX", FILTER_HTF_ADX)
 FILTER_ADX = _env_num("FILTER_ADX", FILTER_ADX)
 FILTER_CHOP = _env_num("FILTER_CHOP", FILTER_CHOP)
@@ -737,6 +750,9 @@ def manage_trades(st, cache):
         try:
             if ck not in cache:
                 cache[ck] = fetch_klines(tr["sym"], tr["tf"], CANDLES, source=tr.get("source"))[0]
+            if tr.get("kind") == "smc":
+                manage_smc(st, key, tr, cache[ck])
+                continue
             status, exit_px, r = update_trade(tr, cache[ck])
         except Exception as e:
             print("track error", tr["sym"], e)
@@ -769,8 +785,10 @@ def manage_trades(st, cache):
                 tr["notified_stop"] = tr["stop"]
 
 
-def paper_stats(st, days=None):
+def paper_stats(st, days=None, strategy=None):
     rows = st["closed"]
+    if strategy:
+        rows = [c for c in rows if c.get("strategy", "sd") == strategy]
     if days:
         rows = [c for c in rows if c["closed"] > time.time() - days * 86400]
     if not rows:
@@ -782,6 +800,134 @@ def paper_stats(st, days=None):
             f"simple {SIMPLE_TP_R:g}R {sum(c['simple'] for c in rows):+.1f}R (after fees)")
 
 
+# ============================ SMC LIVE ============================
+
+def smc_ok(x):
+    """Live / account filters for SMC setups."""
+    if SMC_REQUIRE_DISCOUNT and not x["discount"]:
+        return False
+    if SMC_REQUIRE_TREND and not x["trend"]:
+        return False
+    return sl_pct(x) >= MIN_SL_PCT and passes_filters(x)
+
+
+def smc_message(sym, s, source):
+    side = s["side"]
+    buy = side == "LONG"
+    icon = "🟢" if buy else "🔴"
+    risk = abs(s["entry"] - s["sl"])
+    tp_r = abs(s["tp"] - s["entry"]) / risk
+    tp_what = "previous high (liquidity)" if buy else "previous low (liquidity)"
+    if s["liq"] is None:
+        tp_what = "2R (no clear liquidity)"
+    until = datetime.fromtimestamp(s["expires_ct"] / 1000, IST).strftime("%d %b %I:%M %p IST")
+    opts = [sizing(s, side, m) for m in MARGIN_OPTIONS]
+    z = opts[0]
+    checks = [("Liquidity sweep", True), ("Market structure shift", True), ("FVG entry (50%)" if SMC_ENTRY == "mid" else "FVG entry (edge)", True),
+              ("Discount" if buy else "Premium", s["discount"]), (f"{HTF} trend agrees", s["trend"])]
+    return (
+        f"📌 {icon} <b>SMC LIMIT {'BUY' if buy else 'SELL'} {sym}</b>  ({TIMEFRAME})\n"
+        + (f"⚠️ On Futures this is <b>{FUTURES_NAME[sym]}</b> (price ×1000)\n" if sym in FUTURES_NAME else "")
+        + f"\nLimit entry: <code>{fp(s['entry'])}</code>\n"
+        f"Stop Loss: <code>{fp(s['sl'])}</code> ({pct(s['entry'], s['sl'])})\n"
+        f"Take Profit: <code>{fp(s['tp'])}</code> ({tp_r:.1f}R, {tp_what})\n\n"
+        f"⏳ Valid until {until}. Cancel it if price reaches <code>{fp(s['cancel'])}</code> before filling.\n\n"
+        f"💰 <b>Your trade (Isolated)</b>\n"
+        + "".join(f"${o['margin']:g} margin → <b>{o['lev']}x</b> (position ${o['pos']:.0f}, "
+                  f"SL loss −${o['loss']:.2f}, liq ≈ <code>{fp(o['liq'])}</code>)\n" for o in opts)
+        + f"Profit at TP ≈ +${z['loss'] * tp_r:.2f}\n"
+        + f"💸 Fees ~${z['fee']:.2f} ({fee_r(s):.2f}R).\n\n"
+        + "\n".join(f"{'✅' if v else '❌'} {k}" for k, v in checks) + "\n"
+        f"📐 ADX {HTF} {s.get('hadx', 0):.0f} | CHOP {s.get('chop', 0):.0f}\n\n"
+        f"🤖 I'll tell you when it fills, gets cancelled, or hits TP / SL.\n"
+        f"📊 {SOURCE_LABEL.get(source, source)}\n"
+        f"<i>Manual trade only. Check the chart first. Not financial advice.</i>"
+    )
+
+
+def open_smc_trade(st, key, sym, s, source, candles):
+    st["open"][key] = {
+        "kind": "smc", "status": "pending", "sym": sym, "side": s["side"], "tf": TIMEFRAME, "source": source,
+        "entry": s["entry"], "sl": s["sl"], "tp": s["tp"], "cancel": s["cancel"], "expires_ct": s["expires_ct"],
+        "risk": abs(s["entry"] - s["sl"]), "slp": sl_pct(s), "fee_r": fee_r(s),
+        "usd_r": sizing(s, s["side"])["loss"], "opened": s["time"], "last_ct": candles[s["sig"]]["ct"],
+    }
+
+
+def update_smc(tr, candles):
+    """Walk new closed candles for an SMC order. Returns a list of events."""
+    side, ev = tr["side"], []
+    E, SL, TP, CX = (_px(tr[k], side) for k in ("entry", "sl", "tp", "cancel"))
+    for x in candles:
+        if x["ct"] <= tr["last_ct"]:
+            continue
+        hi, lo, op = (x["h"], x["l"], x["o"]) if side == "LONG" else (-x["l"], -x["h"], -x["o"])
+        tr["last_ct"] = x["ct"]
+        if tr["status"] == "pending":
+            if x["ct"] > tr["expires_ct"]:
+                return ev + [("cancelled", "expired, never filled")]
+            if lo <= E:
+                tr["status"] = "filled"
+                ev.append(("filled", tr["entry"]))
+                if lo <= SL:                                  # stopped out in the fill candle
+                    return ev + [("closed", tr["sl"], -1.0)]
+                continue                                      # TP inside the fill candle is ignored
+            if hi >= CX:
+                return ev + [("cancelled", "price ran away before filling")]
+            continue
+        if lo <= SL:
+            return ev + [("closed", _px(min(op, SL), side), (min(op, SL) - E) / tr["risk"])]
+        if hi >= TP:
+            return ev + [("closed", tr["tp"], (TP - E) / tr["risk"])]
+    if tr["status"] == "filled" and candles and time.time() * 1000 - tr["opened"] > MAX_TRADE_DAYS * 86400000:
+        last = _px(candles[-1]["c"], side)
+        ev.append(("closed", candles[-1]["c"], (last - E) / tr["risk"]))
+    return ev
+
+
+def manage_smc(st, key, tr, candles):
+    icon = "🟢" if tr["side"] == "LONG" else "🔴"
+    name = f"{icon} <b>SMC {tr['side']} {tr['sym']}</b> ({tr['tf']})"
+    for ev in update_smc(tr, candles):
+        if ev[0] == "filled":
+            tg(f"✅ {name}: limit order <b>filled</b> at <code>{fp(ev[1])}</code>\n"
+               f"SL <code>{fp(tr['sl'])}</code> | TP <code>{fp(tr['tp'])}</code> – make sure both are set.")
+        elif ev[0] == "cancelled":
+            tg(f"❌ {name}: <b>cancel the limit order</b> ({ev[1]}). No trade.")
+            st.setdefault("cancelled", 0)
+            st["cancelled"] += 1
+            del st["open"][key]
+            return
+        elif ev[0] == "closed":
+            r = ev[2]
+            net = r - tr["fee_r"]
+            usd = net * tr.get("usd_r", RISK_USD)
+            what = "🎯 TP hit" if r > 0 else "🛑 SL hit"
+            tg(f"🏁 {name} closed at <code>{fp(ev[1])}</code> – {what}\n"
+               f"Result: <b>{r:+.2f}R</b> (after fees ~{net:+.2f}R ≈ <b>{'+' if usd >= 0 else '−'}${abs(usd):.2f}</b>)")
+            st["closed"].append({"sym": tr["sym"], "side": tr["side"], "tf": tr["tf"], "strategy": "smc",
+                                 "r": round(r, 3), "net": round(net, 3), "simple": round(net, 3),
+                                 "usd": round(usd, 2), "closed": int(time.time())})
+            del st["open"][key]
+            return
+
+
+def scan_smc(st, sym, C, H, src):
+    sent = 0
+    n = len(C)
+    for x in find_smc_setups(C, H, SMC_ENTRY, pending=True):
+        if not x.get("pending") or x["sig"] < n - SIGNAL_LOOKBACK or not smc_ok(x):
+            continue
+        key = f"{sym}|{x['side']}|smc|{TIMEFRAME}|{x['sweep_t']}"
+        if key in st["sent"]:
+            continue
+        if tg(smc_message(sym, x, src)):
+            st["sent"][key] = int(time.time())
+            open_smc_trade(st, key, sym, x, src, C)
+            sent += 1
+    return sent
+
+
 def run_scan():
     st = load_state()
     sent, errors, cache = 0, [], {}
@@ -790,7 +936,9 @@ def run_scan():
             C, src = fetch_klines(sym, TIMEFRAME, CANDLES)
             cache[(sym, TIMEFRAME)] = C
             H, _ = fetch_klines(sym, HTF, CANDLES, source=src)
-            for side in ("LONG", "SHORT"):
+            if STRATEGY in ("smc", "both"):
+                sent += scan_smc(st, sym, C, H, src)
+            for side in (("LONG", "SHORT") if STRATEGY in ("sd", "both") else ()):
                 for s in live_setups(C, H, side):
                     if s["score"] < MIN_SCORE:
                         continue
@@ -814,8 +962,10 @@ def run_scan():
     if now.hour >= HEARTBEAT_HOUR_IST and st["last_heartbeat"] != today:
         msg = (f"✅ <b>S&D bot running</b>\nScanning {len(SYMBOLS)} coins on {TIMEFRAME} (+{HTF} trend)\n"
                f"Signals in last 24h: {sum(1 for v in st['sent'].values() if v > time.time() - 86400)}\n"
-               f"Open tracked trades: {len(st['open'])}\n\n"
-               f"📒 <b>Paper results</b>\nLast 30 days: {paper_stats(st, 30)}\nAll time: {paper_stats(st)}")
+               f"Strategy: {STRATEGY.upper()} | open/pending trades: {len(st['open'])}\n\n📒 <b>Paper results</b>")
+        for strat in (("smc", "sd") if STRATEGY == "both" else (STRATEGY,)):
+            msg += (f"\n<b>{strat.upper()}</b> – last 30 days: {paper_stats(st, 30, strat)}\n"
+                    f"all time: {paper_stats(st, None, strat)}")
         if errors:
             msg += f"\n\n⚠️ Errors this run: {len(errors)}\n" + "\n".join(errors[:3])
         if tg(msg):
@@ -1210,8 +1360,13 @@ SMC_FILL_MAX = 24          # limit order expires after 24 candles
 SMC_SL_BUFFER_ATR = 0.1
 
 
-def _smc_long(C, H, entry_mode):
-    """Bullish SMC setups in C (use flip() for bearish)."""
+TF_MS = {"5m": 300000, "15m": 900000, "30m": 1800000, "1h": 3600000, "2h": 7200000,
+         "4h": 14400000, "1d": 86400000}
+
+
+def _smc_long(C, H, entry_mode, pending=False):
+    """Bullish SMC setups in C (use flip() for bearish).
+    pending=True also returns setups whose limit order is still waiting at the last candle."""
     n = len(C)
     h = [x["h"] for x in C]; l = [x["l"] for x in C]; cl = [x["c"] for x in C]
     A = atr(h, l, cl, ATR_LEN)
@@ -1261,20 +1416,37 @@ def _smc_long(C, H, entry_mode):
             continue
         # limit order fill (cancel if price runs 2R away first or the order expires)
         start = max(m, fv + 1) + 1
-        f = None
+        f, cancelled = None, False
         for k in range(start, min(n, start + SMC_FILL_MAX)):
             if l[k] <= entry:
                 f = k
                 break
             if h[k] >= entry + 2 * risk:
+                cancelled = True
                 break
-        if f is None:
-            continue
-        used.add(s)
         prev_high = max(h[max(0, s - 48):s])              # external liquidity above
         leg_high = max(h[s:m + 1])
+        if f is None:
+            sig = start - 1                               # candle on which the setup is known
+            if pending and not cancelled and start + SMC_FILL_MAX > n and sig < n:
+                used.add(s)
+                kk = bisect.bisect_right(hct, C[sig]["ct"]) - 1
+                tf_ms = C[sig]["ct"] - C[sig]["t"] + 1
+                out.append({
+                    "pending": True, "sig": sig, "entry": entry, "sl": sl, "atr": A[sig] or a,
+                    "time": C[sig]["ct"], "sweep_t": C[s]["t"], "score": 6,
+                    "expires_ct": C[sig]["ct"] + SMC_FILL_MAX * tf_ms, "cancel": entry + 2 * risk,
+                    "liq": prev_high if prev_high > entry + 0.5 * risk else None,
+                    "trend": kk >= 0 and he[kk] is not None and hc[kk] > he[kk],
+                    "hadx": HADX[kk] if kk >= 0 and HADX[kk] is not None else 0.0,
+                    "adx": ADX[sig] or 0.0, "chop": CH[sig] if CH[sig] is not None else 100.0,
+                    "discount": entry <= (sweep_low + leg_high) / 2,
+                })
+            continue
+        used.add(s)
         kk = bisect.bisect_right(hct, C[f]["ct"]) - 1
         out.append({
+            "pending": False, "sweep_t": C[s]["t"],
             "e": f, "entry": entry, "sl": sl, "atr": A[f] or a, "time": C[f]["ct"], "score": 6,
             "liq": prev_high if prev_high > entry + 0.5 * risk else None,
             "fill_loss": l[f] <= sl,                      # SL hit in the fill candle: count as a loss
@@ -1286,13 +1458,19 @@ def _smc_long(C, H, entry_mode):
     return out
 
 
-def find_smc_setups(C, H, entry_mode="top"):
-    longs = [dict(x, side="LONG") for x in _smc_long(C, H, entry_mode)]
+def find_smc_setups(C, H, entry_mode="top", pending=False):
+    longs = [dict(x, side="LONG") for x in _smc_long(C, H, entry_mode, pending)]
     shorts = []
-    for x in _smc_long(flip(C), flip(H), entry_mode):
+    for x in _smc_long(flip(C), flip(H), entry_mode, pending):
         x = dict(x, side="SHORT", entry=-x["entry"], sl=-x["sl"])
         x["liq"] = -x["liq"] if x["liq"] is not None else None
+        if "cancel" in x:
+            x["cancel"] = -x["cancel"]
         shorts.append(x)
+    for x in longs + shorts:                              # target: liquidity, else 2R
+        risk = abs(x["entry"] - x["sl"])
+        x["tp"] = x["liq"] if x["liq"] is not None else (
+            x["entry"] + 2 * risk if x["side"] == "LONG" else x["entry"] - 2 * risk)
     return longs + shorts
 
 
@@ -1390,8 +1568,13 @@ def _exit_detail(C, s, side, kind, v, sl):
     kind: 'fixed' (TP at v x R) or 'trail' (v x ATR trailing stop). sl may be the liquidation price."""
     E, S = _px(s["entry"], side), _px(sl, side)
     risk = E - _px(s["sl"], side)
-    tp = E + v * risk if kind == "fixed" else None
-    stop, best, dist = S, E, v * s["atr"]
+    if s.get("fill_loss"):                                   # SMC: stopped out in the fill candle
+        return sl, s["e"]
+    if kind == "price":                                      # fixed target price (SMC liquidity TP)
+        kind, tp = "fixed", _px(s["tp"], side)
+    else:
+        tp = E + v * risk if kind == "fixed" else None
+    stop, best, dist = S, E, (v * s["atr"] if kind == "trail" else 0.0)
     for i in range(s["e"] + 1, len(C)):
         x = C[i]
         hi, lo, op = (x["h"], x["l"], x["o"]) if side == "LONG" else (-x["l"], -x["h"], -x["o"])
@@ -1410,14 +1593,18 @@ def money(x):
     return f"{'+' if x >= 0 else '−'}${abs(x):.2f}"
 
 
-def run_account(balance, margin, leverage, days, mode="risk", risk=1.0):
+def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy=None):
     """Simulate a real account, one position per coin, a trade only opens if free balance >= its margin.
     mode 'risk' : every trade loses ~`risk` $ at SL (leverage picked per trade, like the live signal).
     mode 'fixed': every trade is margin x leverage, so the $ loss depends on the SL distance.
     Fees included; funding/slippage not."""
     global RISK_USD
     RISK_USD = risk
-    exits = [("Trail 3 ATR", "trail", TRAIL_ATR), ("Fixed 2R", "fixed", 2.0), ("Fixed 1R", "fixed", 1.0)]
+    strategy = strategy or ("smc" if STRATEGY == "both" else STRATEGY)
+    if strategy == "smc":
+        exits = [("Liquidity TP", "price", None), ("Fixed 3R", "fixed", 3.0), ("Fixed 2R", "fixed", 2.0)]
+    else:
+        exits = [("Trail 3 ATR", "trail", TRAIL_ATR), ("Fixed 2R", "fixed", 2.0), ("Fixed 1R", "fixed", 1.0)]
     per_hour = {"15m": 4, "30m": 2, "1h": 1, "2h": 0.5, "4h": 0.25}.get(TIMEFRAME, 1)
     need = int(days * 24 * per_hour) + 400                       # period + warm-up
     start_ms = int(time.time() * 1000) - days * 86400000
@@ -1434,10 +1621,13 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0):
             continue
         coins += 1
         last_close[sym] = C[-1]["c"]
-        for side in ("LONG", "SHORT"):
-            for s in setups_for(C, H, side):
-                if (s["score"] < MIN_SCORE or sl_pct(s) < MIN_SL_PCT or s["time"] < start_ms
-                        or not passes_filters(s)):
+        if strategy == "smc":
+            pool = [(x["side"], x) for x in find_smc_setups(C, H, SMC_ENTRY) if smc_ok(x)]
+        else:
+            pool = [(side, x) for side in ("LONG", "SHORT") for x in setups_for(C, H, side)
+                    if x["score"] >= MIN_SCORE and sl_pct(x) >= MIN_SL_PCT and passes_filters(x)]
+        for side, s in pool:
+                if s["time"] < start_ms:
                     continue
                 if mode == "risk":
                     z = sizing(s, side, margin)
@@ -1522,6 +1712,10 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0):
     levs = [c["lev"] for c in cands] or [leverage]
     how = (f"${margin:g} margin, ~${risk:g} loss at SL, leverage {min(levs)}–{max(levs)}x (per trade)"
            if mode == "risk" else f"${margin:g} × {leverage}x per trade (position ${pos:g})")
+    strat_txt = (f"SMC (FVG {'50%' if SMC_ENTRY == 'mid' else 'edge'}"
+                 f"{', discount' if SMC_REQUIRE_DISCOUNT else ''}{', 4h trend' if SMC_REQUIRE_TREND else ''})"
+                 if strategy == "smc" else "S&D")
+    how += f" | strategy {strat_txt}, filters: {active_filters()}"
     head = (f"## Account simulation: ${balance:g} start, {how}, last {days} days\n\n"
             f"{TIMEFRAME} chart, {HTF} trend, score ≥{MIN_SCORE}, SL ≥{MIN_SL_PCT}%, {coins} futures coins, "
             f"fees {FEE_PCT:.2f}% round trip. One position per coin; a trade is skipped if free balance < ${margin:g}.\n\n"
@@ -1570,6 +1764,7 @@ def main():
     ap.add_argument("--sizing", choices=["risk", "fixed"], default="risk",
                     help="risk = same $ loss per trade (default), fixed = margin x leverage")
     ap.add_argument("--risk", type=float, default=1.0, help="$ loss at SL in risk sizing")
+    ap.add_argument("--strategy", choices=["smc", "sd", ""], default="", help="account mode strategy")
     args = ap.parse_args()
     resolve_symbols()
     if args.test:
@@ -1577,7 +1772,10 @@ def main():
                 f"{', '.join(f'{x} (={FUTURES_NAME[x]})' if x in FUTURES_NAME else x for x in SYMBOLS)}\n"
                 f"Timeframe: {TIMEFRAME} (trend: {HTF}), min grade: {MIN_SCORE}/6\n"
                 f"Min SL: {MIN_SL_PCT}%, fees assumed: {FEE_PCT:.2f}%\n"
-                f"Exit plan: trailing stop {TRAIL_ATR:g}×ATR (simple option {SIMPLE_TP_R:g}R)\n"
+                f"Strategy: {STRATEGY.upper()}"
+                + (f" (SMC: FVG {'50%' if SMC_ENTRY == 'mid' else 'edge'}, discount {'on' if SMC_REQUIRE_DISCOUNT else 'off'}, "
+                   f"trend {'on' if SMC_REQUIRE_TREND else 'off'}, TP = liquidity)" if STRATEGY != "sd" else "") + "\n"
+                f"Filters: {active_filters()}\n"
                 f"Sizing: ${' / $'.join(f'{m:g}' for m in MARGIN_OPTIONS)} margin, max loss ${RISK_USD:g}/trade, leverage ≤{MAX_LEVERAGE}x")
         sys.exit(0 if ok else 1)
     if args.backtest:
@@ -1590,7 +1788,8 @@ def main():
         run_amd_backtest(args.candles)
         return
     if args.account:
-        run_account(args.balance, args.margin, args.leverage, args.days, args.sizing, args.risk)
+        run_account(args.balance, args.margin, args.leverage, args.days, args.sizing, args.risk,
+                    args.strategy or None)
         return
     run_scan()
 

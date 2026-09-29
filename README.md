@@ -84,6 +84,19 @@ Variable add panninaa adutha run-la irundhu apply aagum. Delete panninaa default
 | `RISK_USD` | `1` | SL hit aana max loss ($). Unga total account-la ~1% vechukkonga |
 | `MAX_LEVERAGE` | `20` | Idha thaandi leverage suggest pannaadhu |
 
+### Live strategy: SMC (default)
+`STRATEGY` variable: `smc` (default), `sd` (supply & demand), `both`.
+
+SMC signal = **limit order**: sweep → MSS → FVG 50%-la limit entry, discount-la mattum, TP = previous high/low (liquidity), illana 2R.
+- 📌 Signal: entry, SL, TP, "valid until" time, cancel level, $5/$8 margin-ku leverage
+- ✅ Fill aanadhum alert (SL, TP set pannunga)
+- ❌ 24 candles-la fill aagala, illa price odi poyiduchu-na "cancel the order" alert
+- 🏁 TP / SL hit aanadhum result ($ and R)
+- 📒 Daily 9 AM: SMC paper results
+
+Settings: `SMC_ENTRY` (`mid` / `top`), `SMC_REQUIRE_DISCOUNT` (default on), `SMC_REQUIRE_TREND` (default off).
+Account mode-la **strategy** input-la `smc` / `sd` select panni $ result paakalaam.
+
 ### SMC backtest (sweep → MSS → FVG)
 Actions → Run workflow → mode **smc**. Swing low/high sweep → reclaim → MSS (structure break) → displacement FVG-la
 limit entry (edge / 50%), SL sweep-ku appuram. Exits: 1.5R, 2R, 3R, previous high/low (liquidity), trail 3 ATR.
