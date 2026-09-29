@@ -84,8 +84,11 @@ Variable add panninaa adutha run-la irundhu apply aagum. Delete panninaa default
 | `RISK_USD` | `1` | SL hit aana max loss ($). Unga total account-la ~1% vechukkonga |
 | `MAX_LEVERAGE` | `20` | Idha thaandi leverage suggest pannaadhu |
 
-### Coin selection (8 metrics, dhinamum oru dhadava)
-Top 150 Futures coins-la irundhu best 50 (`TOP_N`) choose pannum. Coin selection-ku mattum; trade rules maaraadhu.
+### Coin selection
+**Default: Binance Futures-la 24h volume top 50** (ellaa filters-um idhula dhaan validate aachu).
+
+#### Experimental: 8-metric selection (default OFF, validate aagala)
+On panna Variables-la `COIN_SELECT` = `1`. Top 150-la irundhu best 50 choose pannum:
 
 **Safety limits** (fail aana coin varaadhu): spread ≤ 0.10%, open interest ≥ $10M, |funding (premium)| ≤ 0.05%, history ≥ 60 naal.
 
@@ -94,7 +97,7 @@ funding neutral, spread ↓, BTC correlation ↑ (BTC filter-ku venum).
 
 - Result `coin_universe.json`-la save aagum, 24h-ku oru dhadava refresh. Telegram-la "🪙 Coin list updated" varum.
 - Data fetch fail aanaa, pazhaiya volume top 50-ku fallback.
-- Off panna: Variables-la `COIN_SELECT` = `0`. Pool size: `COIN_POOL` (default 150).
+- Pool size: `COIN_POOL` (default 150). 30-day test-la volume top 50-a vida kammi-a vandhadhaala default off.
 - ⚠️ Backtest / account modes-um inniku choose aana coins-a use pannum, so past results konjam optimistic-a irukkum.
 
 ### Live strategy: SMC (default)

@@ -309,7 +309,7 @@ def volume_top_symbols(n):
 # Pick the best TOP_N coins from the top COIN_POOL futures coins, once a day, using:
 # volume, open interest, ATR %, ADX (4h), efficiency ratio, funding (premium index),
 # spread and BTC correlation. Safety limits remove illiquid / crowded / brand-new coins.
-COIN_SELECT = True
+COIN_SELECT = False        # off: plain volume top-N (the setup all filters were validated on)
 COIN_POOL = 150
 MAX_SPREAD_PCT = 0.10      # spot bid/ask spread (proxy for futures spread)
 MIN_OI_USD = 10_000_000    # futures open interest (Binance public data, 1 day late)
@@ -318,6 +318,8 @@ MIN_HISTORY_DAYS = 60
 UNIVERSE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coin_universe.json")
 if os.getenv("COIN_SELECT", "").strip().lower() in ("0", "false", "no"):
     COIN_SELECT = False
+elif os.getenv("COIN_SELECT", "").strip().lower() in ("1", "true", "yes"):
+    COIN_SELECT = True             # experimental 8-metric selection (not validated)
 COIN_POOL = _env_num("COIN_POOL", COIN_POOL, int)
 DATA_VISION = "https://data.binance.vision/data/futures/um/daily"
 
