@@ -1,28 +1,29 @@
 {
  "filters": {
-  "SMC_BTC": 1,
-  "SMC_MIN_SL": 1.5
+  "SMC_MSS_FAST": 6,
+  "SMC_MIN_RR": 1.5
  },
- "updated": "2026-09-29 05:01 UTC",
+ "be": 0.0,
+ "updated": "2026-09-29 08:57 UTC",
  "exit": "Prev high/low (liquidity)",
  "baseline": {
   "train": [
-   353,
-   0.197
+   364,
+   0.198
   ],
   "test": [
-   91,
-   -0.029
+   99,
+   0.025
   ]
  },
  "with_filters": {
   "train": [
-   125,
-   0.355
+   173,
+   0.368
   ],
   "test": [
-   33,
-   0.697
+   45,
+   0.298
   ]
  }
 }
