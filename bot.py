@@ -2145,6 +2145,45 @@ def send_trade_log(log, balance, exit_name, days):
     tg(chunk + "\n<b>" + summary.replace("\n", "</b>\n<b>", 1) + "</b>")
 
 
+def send_monthly(log, balance, exit_name):
+    """Month-by-month result (by close month, IST). Balance carries over month to month."""
+    closed = sorted([t for t in log if t["why"] != "open"], key=lambda t: t["close"])
+    if not closed:
+        return
+    months = {}
+    for t in closed:
+        k = datetime.fromtimestamp(t["close"] / 1000, IST).strftime("%Y-%m")
+        months.setdefault(k, []).append(t)
+    bal, rows, lines = balance, [], []
+    for k in sorted(months):
+        ts = months[k]
+        start = bal
+        peak, dd = bal, 0.0
+        for t in ts:
+            bal += t["pnl"]
+            peak = max(peak, bal)
+            dd = max(dd, peak - bal)
+        w = sum(1 for t in ts if t["pnl"] > 0)
+        net = bal - start
+        name = datetime.strptime(k, "%Y-%m").strftime("%b %Y")
+        icon = "🟢" if net >= 0 else "🔴"
+        rows.append(f"| {name} | ${start:.2f} | ${bal:.2f} | {money(net)} | {net / start * 100:+.1f}% | {len(ts)} "
+                    f"| {w}/{len(ts) - w} | {w / len(ts) * 100:.0f}% | −${dd:.2f} |")
+        lines.append(f"{icon} <b>{name}</b>: {money(net)} ({net / start * 100:+.1f}%) | {len(ts)} trades "
+                     f"{w}W/{len(ts) - w}L ({w / len(ts) * 100:.0f}%) | DD −${dd:.2f} | ${start:.2f} → ${bal:.2f}")
+    pos = sum(1 for k in months if sum(t["pnl"] for t in months[k]) >= 0)
+    md = (f"### Month by month – {exit_name}\n\nBalance carries over; month = when the trade closed (IST).\n\n"
+          "| Month | Start | End | P&L | Return | Trades | W/L | Win% | Month DD |\n"
+          "|---|---|---|---|---|---|---|---|---|\n" + "\n".join(rows) +
+          f"\n\nProfitable months: {pos}/{len(months)}\n")
+    print(md)
+    if os.getenv("GITHUB_STEP_SUMMARY"):
+        with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
+            f.write("\n" + md)
+    tg(f"📅 <b>Month by month</b> ({exit_name}, ${balance:g} start)\n\n" + "\n".join(lines)
+       + f"\n\nProfitable months: <b>{pos}/{len(months)}</b>")
+
+
 def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy=None):
     """Simulate a real account, one position per coin, a trade only opens if free balance >= its margin.
     mode 'risk' : every trade loses ~`risk` $ at SL (leverage picked per trade, like the live signal).
@@ -2349,6 +2388,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 + (f", {r['liqs']} liquidated" if r["liqs"] else "") + "\n")
     msg += "\nFunding & slippage not included. Full table: GitHub → Actions → run summary."
     tg(msg)
+    send_monthly(trade_log, balance, exits[0][0])
     send_trade_log(trade_log, balance, exits[0][0], days)
 
 
