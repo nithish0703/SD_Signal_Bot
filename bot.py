@@ -162,7 +162,7 @@ def fetch_klines(symbol, interval, limit, end_time=None, source=None):
                 continue
             now_ms = int(time.time() * 1000)
             candles = [{"t": int(k[0]), "o": float(k[1]), "h": float(k[2]), "l": float(k[3]),
-                        "c": float(k[4]), "ct": int(k[6])} for k in r.json()]
+                        "c": float(k[4]), "v": float(k[5]), "ct": int(k[6])} for k in r.json()]
             candles = [x for x in candles if x["ct"] < now_ms]  # drop the running candle
             if not candles:
                 last_err = f"{name} empty"
@@ -395,8 +395,8 @@ def pivots(vals, p, is_high):
 
 def flip(candles):
     """Mirror prices so SHORT (supply) setups can reuse the LONG (demand) logic."""
-    return [{"t": x["t"], "ct": x["ct"], "o": -x["o"], "c": -x["c"], "h": -x["l"], "l": -x["h"]}
-            for x in candles]
+    return [{"t": x["t"], "ct": x["ct"], "o": -x["o"], "c": -x["c"], "h": -x["l"], "l": -x["h"],
+             "v": x.get("v", 0.0)} for x in candles]
 
 # ============================ STRATEGY ============================
 
@@ -808,7 +808,7 @@ def smc_ok(x):
         return False
     if SMC_REQUIRE_TREND and not x["trend"]:
         return False
-    return sl_pct(x) >= MIN_SL_PCT and passes_filters(x)
+    return sl_pct(x) >= MIN_SL_PCT and passes_filters(x) and smc_quality_ok(x)
 
 
 def smc_message(sym, s, source):
@@ -838,7 +838,9 @@ def smc_message(sym, s, source):
         + f"Profit at TP ≈ +${z['loss'] * tp_r:.2f}\n"
         + f"💸 Fees ~${z['fee']:.2f} ({fee_r(s):.2f}R).\n\n"
         + "\n".join(f"{'✅' if v else '❌'} {k}" for k, v in checks) + "\n"
-        f"📐 ADX {HTF} {s.get('hadx', 0):.0f} | CHOP {s.get('chop', 0):.0f}\n\n"
+        f"📐 ADX {HTF} {s.get('hadx', 0):.0f} | CHOP {s.get('chop', 0):.0f} | "
+        f"displacement {s.get('disp', 0):.1f} ATR | target {s.get('tgt_r', 0):.1f}R\n"
+        + (f"🔍 Quality filters passed: {smc_quality_txt()}\n" if SMC_ACTIVE else "") + "\n"
         f"🤖 I'll tell you when it fills, gets cancelled, or hits TP / SL.\n"
         f"📊 {SOURCE_LABEL.get(source, source)}\n"
         f"<i>Manual trade only. Check the chart first. Not financial advice.</i>"
@@ -912,12 +914,15 @@ def manage_smc(st, key, tr, candles):
             return
 
 
-def scan_smc(st, sym, C, H, src):
+def scan_smc(st, sym, C, H, src, btc_fn=None):
     sent = 0
     n = len(C)
-    for x in find_smc_setups(C, H, SMC_ENTRY, pending=True):
+    for x in tag_btc(find_smc_setups(C, H, SMC_ENTRY, pending=True), sym, btc_fn):
         if not x.get("pending") or x["sig"] < n - SIGNAL_LOOKBACK or not smc_ok(x):
             continue
+        if "SMC_MAX_FILL" in SMC_ACTIVE:                  # validated: only wait N candles for the fill
+            x["expires_ct"] = min(x["expires_ct"],
+                                  x["time"] + int(SMC_ACTIVE["SMC_MAX_FILL"]) * (C[-1]["ct"] - C[-1]["t"] + 1))
         key = f"{sym}|{x['side']}|smc|{TIMEFRAME}|{x['sweep_t']}"
         if key in st["sent"]:
             continue
@@ -931,13 +936,19 @@ def scan_smc(st, sym, C, H, src):
 def run_scan():
     st = load_state()
     sent, errors, cache = 0, [], {}
+    btc_fn = None
+    if STRATEGY in ("smc", "both") and "SMC_BTC" in SMC_ACTIVE:
+        try:
+            btc_fn = btc_trend_fn(fetch_klines("BTCUSDT", HTF, CANDLES)[0])
+        except Exception as e:
+            print("BTC data error", e)
     for sym in SYMBOLS:
         try:
             C, src = fetch_klines(sym, TIMEFRAME, CANDLES)
             cache[(sym, TIMEFRAME)] = C
             H, _ = fetch_klines(sym, HTF, CANDLES, source=src)
             if STRATEGY in ("smc", "both"):
-                sent += scan_smc(st, sym, C, H, src)
+                sent += scan_smc(st, sym, C, H, src, btc_fn)
             for side in (("LONG", "SHORT") if STRATEGY in ("sd", "both") else ()):
                 for s in live_setups(C, H, side):
                     if s["score"] < MIN_SCORE:
@@ -1376,8 +1387,14 @@ def _smc_long(C, H, entry_mode, pending=False):
     he = ema(hc, EMA_LEN)
     hct = [x["ct"] for x in H]
     HADX = adx([x["h"] for x in H], [x["l"] for x in H], hc)
+    o = [x["o"] for x in C]
+    vol = [x.get("v", 0.0) for x in C]
+    hl = [x["l"] for x in H]
+    HA = atr([x["h"] for x in H], hl, hc, ATR_LEN)
+    hpl = pivots(hl, PIVOT_LEN, False)                    # 4h swing lows (for the HTF POI check)
+    lows = pivots(l, PIVOT_LEN, False)
     out, used = [], set()
-    for p, L in pivots(l, PIVOT_LEN, False):
+    for p, L in lows:
         # 1. sweep: first candle that trades below the swing low
         s = next((k for k in range(p + PIVOT_LEN + 1, min(n, p + SMC_SWEEP_MAX)) if l[k] < L), None)
         if s is None or s in used:
@@ -1426,6 +1443,18 @@ def _smc_long(C, H, entry_mode, pending=False):
                 break
         prev_high = max(h[max(0, s - 48):s])              # external liquidity above
         leg_high = max(h[s:m + 1])
+        # ---- quality features (all known at signal time)
+        q = {
+            "disp": abs(cl[m] - o[m]) / a,                               # MSS candle body in ATRs
+            "fvg_atr": (zt - zb) / a,                                    # FVG size in ATRs
+            "eq": any(abs(v2 - L) <= 0.15 * a for i2, v2 in lows if p - 48 <= i2 < p),   # equal lows swept
+            "session": 7 <= (C[s]["t"] // 3600000) % 24 < 20,            # London / New York hours (UTC)
+            "vol": (vol[s] / (sum(vol[s - 20:s]) / 20)) if s >= 20 and sum(vol[s - 20:s]) > 0 else 0.0,
+        }
+        k4 = bisect.bisect_right(hct, C[s]["ct"]) - 1
+        ha = HA[k4] if k4 >= 0 and HA[k4] else a
+        q["htf_poi"] = any(abs(v2 - sweep_low) <= 0.5 * ha for i2, v2 in hpl
+                           if k4 - 60 <= i2 and i2 + PIVOT_LEN <= k4)    # sweep at a confirmed 4h swing low
         if f is None:
             sig = start - 1                               # candle on which the setup is known
             if pending and not cancelled and start + SMC_FILL_MAX > n and sig < n:
@@ -1440,7 +1469,7 @@ def _smc_long(C, H, entry_mode, pending=False):
                     "trend": kk >= 0 and he[kk] is not None and hc[kk] > he[kk],
                     "hadx": HADX[kk] if kk >= 0 and HADX[kk] is not None else 0.0,
                     "adx": ADX[sig] or 0.0, "chop": CH[sig] if CH[sig] is not None else 100.0,
-                    "discount": entry <= (sweep_low + leg_high) / 2,
+                    "discount": entry <= (sweep_low + leg_high) / 2, "fill_wait": None, **q,
                 })
             continue
         used.add(s)
@@ -1453,7 +1482,7 @@ def _smc_long(C, H, entry_mode, pending=False):
             "trend": kk >= 0 and he[kk] is not None and hc[kk] > he[kk],
             "hadx": HADX[kk] if kk >= 0 and HADX[kk] is not None else 0.0,
             "adx": ADX[f] or 0.0, "chop": CH[f] if CH[f] is not None else 100.0,
-            "discount": entry <= (sweep_low + leg_high) / 2,
+            "discount": entry <= (sweep_low + leg_high) / 2, "fill_wait": f - start, **q,
         })
     return out
 
@@ -1471,7 +1500,87 @@ def find_smc_setups(C, H, entry_mode="top", pending=False):
         risk = abs(x["entry"] - x["sl"])
         x["tp"] = x["liq"] if x["liq"] is not None else (
             x["entry"] + 2 * risk if x["side"] == "LONG" else x["entry"] - 2 * risk)
+        x["tgt_r"] = abs(x["tp"] - x["entry"]) / risk
+        x.setdefault("btc_ok", True)
     return longs + shorts
+
+
+def btc_trend_fn(HB):
+    """ct -> +1 (BTC 4h above EMA50), -1 (below) or 0 (unknown)."""
+    hc = [x["c"] for x in HB]
+    he = ema(hc, EMA_LEN)
+    hct = [x["ct"] for x in HB]
+
+    def f(ct):
+        k = bisect.bisect_right(hct, ct) - 1
+        if k < 0 or he[k] is None:
+            return 0
+        return 1 if hc[k] > he[k] else -1
+    return f
+
+
+def tag_btc(setups, sym, btc_fn):
+    for x in setups:
+        if sym == "BTCUSDT" or btc_fn is None:
+            x["btc_ok"] = True
+        else:
+            tr = btc_fn(x["time"])
+            x["btc_ok"] = tr == 0 or (tr > 0) == (x["side"] == "LONG")
+    return setups
+
+
+# Candidate quality filters: (label, variable, value, test). Only the ones that pass the
+# train/test validation in `--smc` mode get applied (saved to smc_filters.json).
+SMC_QUALITY = [
+    ("Strong displacement (MSS body ≥1 ATR)", "SMC_MIN_DISP", 1.0, lambda t, v: t["disp"] >= v),
+    ("Big FVG (≥0.3 ATR)", "SMC_MIN_FVG", 0.3, lambda t, v: t["fvg_atr"] >= v),
+    ("Equal lows/highs swept", "SMC_EQUAL_LEVELS", 1, lambda t, v: t["eq"]),
+    ("London/NY session (07–20 UTC)", "SMC_SESSION", 1, lambda t, v: t["session"]),
+    ("4h POI (sweep at a 4h swing)", "SMC_HTF_POI", 1, lambda t, v: t["htf_poi"]),
+    ("Target ≥1.5R", "SMC_MIN_RR", 1.5, lambda t, v: t["tgt_r"] >= v),
+    ("Fill within 12 candles", "SMC_MAX_FILL", 12, lambda t, v: t["fill_wait"] is None or t["fill_wait"] <= v),
+    ("Sweep volume ≥1.5× average", "SMC_MIN_VOL", 1.5, lambda t, v: t["vol"] >= v),
+    ("BTC 4h trend agrees", "SMC_BTC", 1, lambda t, v: t["btc_ok"]),
+]
+SMC_FILTERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smc_filters.json")
+
+
+def load_smc_quality():
+    """Active quality filters: validated file first, explicit repo variables override."""
+    active = {}
+    try:
+        with open(SMC_FILTERS_FILE) as f:
+            active = {k: float(v) for k, v in json.load(f).get("filters", {}).items()}
+    except Exception:
+        pass
+    for _, var, _, _ in SMC_QUALITY:
+        raw = os.getenv(var, "").strip()
+        if raw:
+            try:
+                val = float(raw)
+                if val:
+                    active[var] = val
+                else:
+                    active.pop(var, None)
+            except ValueError:
+                print(f"Ignoring invalid {var}={raw!r}")
+    return active
+
+
+SMC_ACTIVE = load_smc_quality()
+
+
+def smc_quality_ok(x, active=None):
+    active = SMC_ACTIVE if active is None else active
+    for _, var, _, fn in SMC_QUALITY:
+        if var in active and not fn(x, active[var]):
+            return False
+    return True
+
+
+def smc_quality_txt(active=None):
+    active = SMC_ACTIVE if active is None else active
+    return ", ".join(lbl for lbl, var, _, _ in SMC_QUALITY if var in active) or "none"
 
 
 def _smc(fn):
@@ -1502,9 +1611,77 @@ SMC_TESTS = [
 ]
 
 
+def validate_quality(trades):
+    """Train = everything before the last 60 days, test = last 60 days (never used to choose).
+    A filter passes only if it beats the live baseline in BOTH periods and is profitable in the test.
+    Passing filters are combined greedily (by train) and the combination must also beat the test baseline."""
+    ex = "Prev high/low (liquidity)"
+    cut = time.time() * 1000 - 60 * 86400000
+    base = [t for t in trades if (not SMC_REQUIRE_DISCOUNT or t["discount"])
+            and (not SMC_REQUIRE_TREND or t["trend"]) and passes_filters(t)]
+
+    def ev(sel):
+        tr = _stats([t for t in sel if t["time"] < cut], ex, FEE_PCT)
+        te = _stats([t for t in sel if t["time"] >= cut], ex, FEE_PCT)
+        return tr[0], tr[2], te[0], te[2]
+
+    bn, bavg, btn, btavg = ev(base)
+    rows, passed = [], []
+    for lbl, var, val, fn in SMC_QUALITY:
+        n, avg, tn, tavg = ev([t for t in base if fn(t, val)])
+        ok = n >= 60 and tn >= 20 and avg >= bavg + 0.02 and tavg > btavg and tavg > 0
+        rows.append(f"| {lbl} | {n} / {avg:+.2f}R | {tn} / {tavg:+.2f}R | {'✅' if ok else '❌'} |")
+        if ok:
+            passed.append((avg, lbl, var, val))
+    passed.sort(reverse=True)
+
+    def apply(active):
+        return [t for t in base if smc_quality_ok(t, active)]
+
+    combo = {}
+    cur = (bn, bavg, btn, btavg)
+    for _, lbl, var, val in passed:
+        trial = dict(combo, **{var: val})
+        r = ev(apply(trial))
+        if r[0] >= 60 and r[2] >= 20 and r[1] >= cur[1] + 0.01:
+            combo, cur = trial, r
+    if combo and not (cur[3] > btavg and cur[3] > 0):
+        combo = {passed[0][2]: passed[0][3]}               # combination failed the test: best single
+        cur = ev(apply(combo))
+    if not combo:
+        cur = (bn, bavg, btn, btavg)
+
+    result = {"filters": combo, "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+              "exit": ex, "baseline": {"train": [bn, round(bavg, 3)], "test": [btn, round(btavg, 3)]},
+              "with_filters": {"train": [cur[0], round(cur[1], 3)], "test": [cur[2], round(cur[3], 3)]}}
+    with open(SMC_FILTERS_FILE, "w") as f:
+        json.dump(result, f, indent=1)
+
+    names = smc_quality_txt(combo)
+    table = ("### Quality filters: train / test validation\n\n"
+             f"Baseline = live setup ({'discount' if SMC_REQUIRE_DISCOUNT else 'no discount'}), exit = {ex}, market fees. "
+             "Train = before the last 60 days, test = last 60 days. Cells = trades / net R per trade.\n\n"
+             f"| Filter | Train | Test | Passed |\n|---|---|---|---|\n"
+             f"| **Baseline (no quality filter)** | {bn} / {bavg:+.2f}R | {btn} / {btavg:+.2f}R | |\n"
+             + "\n".join(rows) +
+             f"\n\n**Applied to live signals:** {names} → train {cur[0]} / {cur[1]:+.2f}R, test {cur[2]} / {cur[3]:+.2f}R\n")
+    msg = (f"\n<b>Quality filters (train → last 60 days test)</b>\n"
+           f"Baseline: train {bavg:+.2f}R ({bn}), test {btavg:+.2f}R ({btn})\n"
+           + ("Passed: " + ", ".join(p[1] for p in passed) if passed else "Passed: none") + "\n"
+           f"✅ <b>Applied to live:</b> {names}\n"
+           f"With them: train {cur[1]:+.2f}R ({cur[0]}), test {cur[3]:+.2f}R ({cur[2]})")
+    return table, msg
+
+
 def run_smc_backtest(total):
     groups = {"top": [], "mid": []}
     coins = 0
+    try:
+        HB, _ = fetch_history("BTCUSDT", HTF, max(total // 4 + EMA_LEN + 50, 300))
+        btc_fn = btc_trend_fn(HB)
+    except Exception as e:
+        print("BTC data error", e)
+        btc_fn = None
     for sym in SYMBOLS:
         try:
             C, src = fetch_history(sym, TIMEFRAME, total)
@@ -1514,7 +1691,7 @@ def run_smc_backtest(total):
             continue
         coins += 1
         for mode in groups:
-            for st in find_smc_setups(C, H, mode):
+            for st in tag_btc(find_smc_setups(C, H, mode), sym, btc_fn):
                 if sl_pct(st) < MIN_SL_PCT:
                     continue
                 st["slp"], st["sym"] = sl_pct(st), sym
@@ -1557,7 +1734,12 @@ def run_smc_backtest(total):
     if os.getenv("GITHUB_STEP_SUMMARY"):
         with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
             f.write(report)
-    tg(f"🧠 <b>SMC backtest</b> ({TIMEFRAME}, {HTF} bias, {coins} coins)\n" + "\n".join(parts)
+    qtable, qmsg = validate_quality(groups.get(SMC_ENTRY, groups["mid"]))
+    print(qtable)
+    if os.getenv("GITHUB_STEP_SUMMARY"):
+        with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
+            f.write("\n" + qtable)
+    tg(f"🧠 <b>SMC backtest</b> ({TIMEFRAME}, {HTF} bias, {coins} coins)\n" + "\n".join(parts) + "\n" + qmsg
        + "\n\nFull tables: GitHub → Actions → run summary.")
 
 
@@ -1612,6 +1794,12 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     liq_dist = max(0.0, 100 / leverage - MMR_PCT)                 # % move that liquidates
 
     cands, coins, last_close = [], 0, {}
+    btc_fn = None
+    if strategy == "smc" and "SMC_BTC" in SMC_ACTIVE:
+        try:
+            btc_fn = btc_trend_fn(fetch_history("BTCUSDT", HTF, max(need // 4 + EMA_LEN + 50, 300))[0])
+        except Exception as e:
+            print("BTC data error", e)
     for sym in SYMBOLS:
         try:
             C, src = fetch_history(sym, TIMEFRAME, need)
@@ -1622,7 +1810,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
         coins += 1
         last_close[sym] = C[-1]["c"]
         if strategy == "smc":
-            pool = [(x["side"], x) for x in find_smc_setups(C, H, SMC_ENTRY) if smc_ok(x)]
+            pool = [(x["side"], x) for x in tag_btc(find_smc_setups(C, H, SMC_ENTRY), sym, btc_fn) if smc_ok(x)]
         else:
             pool = [(side, x) for side in ("LONG", "SHORT") for x in setups_for(C, H, side)
                     if x["score"] >= MIN_SCORE and sl_pct(x) >= MIN_SL_PCT and passes_filters(x)]
@@ -1713,7 +1901,8 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     how = (f"${margin:g} margin, ~${risk:g} loss at SL, leverage {min(levs)}–{max(levs)}x (per trade)"
            if mode == "risk" else f"${margin:g} × {leverage}x per trade (position ${pos:g})")
     strat_txt = (f"SMC (FVG {'50%' if SMC_ENTRY == 'mid' else 'edge'}"
-                 f"{', discount' if SMC_REQUIRE_DISCOUNT else ''}{', 4h trend' if SMC_REQUIRE_TREND else ''})"
+                 f"{', discount' if SMC_REQUIRE_DISCOUNT else ''}{', 4h trend' if SMC_REQUIRE_TREND else ''}"
+                 f", quality: {smc_quality_txt()})"
                  if strategy == "smc" else "S&D")
     how += f" | strategy {strat_txt}, filters: {active_filters()}"
     head = (f"## Account simulation: ${balance:g} start, {how}, last {days} days\n\n"
@@ -1776,7 +1965,8 @@ def main():
                 + (f" (SMC: FVG {'50%' if SMC_ENTRY == 'mid' else 'edge'}, discount {'on' if SMC_REQUIRE_DISCOUNT else 'off'}, "
                    f"trend {'on' if SMC_REQUIRE_TREND else 'off'}, TP = liquidity)" if STRATEGY != "sd" else "") + "\n"
                 f"Filters: {active_filters()}\n"
-                f"Sizing: ${' / $'.join(f'{m:g}' for m in MARGIN_OPTIONS)} margin, max loss ${RISK_USD:g}/trade, leverage ≤{MAX_LEVERAGE}x")
+                + (f"SMC quality filters (validated): {smc_quality_txt()}\n" if STRATEGY != "sd" else "")
+                + f"Sizing: ${' / $'.join(f'{m:g}' for m in MARGIN_OPTIONS)} margin, max loss ${RISK_USD:g}/trade, leverage ≤{MAX_LEVERAGE}x")
         sys.exit(0 if ok else 1)
     if args.backtest:
         run_backtest(args.candles)

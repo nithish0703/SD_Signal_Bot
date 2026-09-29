@@ -97,6 +97,16 @@ SMC signal = **limit order**: sweep → MSS → FVG 50%-la limit entry, discount
 Settings: `SMC_ENTRY` (`mid` / `top`), `SMC_REQUIRE_DISCOUNT` (default on), `SMC_REQUIRE_TREND` (default off).
 Account mode-la **strategy** input-la `smc` / `sd` select panni $ result paakalaam.
 
+### SMC quality filters (auto: proof irundhaa mattum)
+**mode: smc** backtest run aagumbodhu, indha 9 filters-aiyum test pannum:
+strong displacement, big FVG, equal lows/highs, London/NY session, 4h POI, target ≥1.5R, 12 candles-la fill, sweep volume, BTC trend.
+
+- **Train** = last 60 days-ku munnaadi irukkira data, **Test** = last 60 days (choose pannumbodhu use aagaadhu)
+- Filter rendulayum live setup-a vida better-a irundhu, test-la profit-a irundhaa mattum **pass**
+- Pass aanadhu `smc_filters.json`-la save aagi, **live signals-la thaana apply** aagum. Edhuvum pass aagala-na, edhuvum apply aagaadhu.
+- Oru filter-a kattaayam on/off panna: Variables-la adhoda name (e.g. `SMC_SESSION` = `1` on, `0` off)
+- Maasam oru dhadava **mode: smc** thirumba run pannunga, pudhu data-vechu re-check aagum.
+
 ### SMC backtest (sweep → MSS → FVG)
 Actions → Run workflow → mode **smc**. Swing low/high sweep → reclaim → MSS (structure break) → displacement FVG-la
 limit entry (edge / 50%), SL sweep-ku appuram. Exits: 1.5R, 2R, 3R, previous high/low (liquidity), trail 3 ATR.

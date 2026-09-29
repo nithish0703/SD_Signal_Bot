@@ -76,6 +76,15 @@ jobs:
           SMC_ENTRY: ${{ vars.SMC_ENTRY }}
           SMC_REQUIRE_DISCOUNT: ${{ vars.SMC_REQUIRE_DISCOUNT }}
           SMC_REQUIRE_TREND: ${{ vars.SMC_REQUIRE_TREND }}
+          SMC_MIN_DISP: ${{ vars.SMC_MIN_DISP }}
+          SMC_MIN_FVG: ${{ vars.SMC_MIN_FVG }}
+          SMC_EQUAL_LEVELS: ${{ vars.SMC_EQUAL_LEVELS }}
+          SMC_SESSION: ${{ vars.SMC_SESSION }}
+          SMC_HTF_POI: ${{ vars.SMC_HTF_POI }}
+          SMC_MIN_RR: ${{ vars.SMC_MIN_RR }}
+          SMC_MAX_FILL: ${{ vars.SMC_MAX_FILL }}
+          SMC_MIN_VOL: ${{ vars.SMC_MIN_VOL }}
+          SMC_BTC: ${{ vars.SMC_BTC }}
           FILTER_HTF_ADX: ${{ vars.FILTER_HTF_ADX }}
           FILTER_ADX: ${{ vars.FILTER_ADX }}
           FILTER_CHOP: ${{ vars.FILTER_CHOP }}
@@ -95,11 +104,12 @@ jobs:
           fi
 
       - name: Save state (stops duplicate signals)
-        if: github.event.inputs.mode == '' || github.event.inputs.mode == 'scan'
+        if: github.event.inputs.mode == '' || github.event.inputs.mode == 'scan' || github.event.inputs.mode == 'smc'
         run: |
           git config user.name "sd-signal-bot"
           git config user.email "sd-signal-bot@users.noreply.github.com"
           git add state.json
+          if [ -f smc_filters.json ]; then git add smc_filters.json; fi
           if ! git diff --cached --quiet; then
             git commit -m "bot: update state"
             git pull --rebase --autostash || true
