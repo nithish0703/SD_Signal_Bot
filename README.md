@@ -107,6 +107,11 @@ strong displacement, big FVG, equal lows/highs, London/NY session, 4h POI, targe
 - Oru filter-a kattaayam on/off panna: Variables-la adhoda name (e.g. `SMC_SESSION` = `1` on, `0` off)
 - Maasam oru dhadava **mode: smc** thirumba run pannunga, pudhu data-vechu re-check aagum.
 
+**Loss-fix candidates** (losing trades review-la irundhu), adhe train/test rule-la test aagum:
+BTC 4h ADX ≥20, BTC trend 2 naal stable, SL ≥1.5%, SHORT coin 4h downtrend-la mattum,
+oru coin-la SL-ku appuram 72h cooldown, 24h-la 3 SL aana pause. Table-la ovvonnum evvalavu losses / wins remove pannudhu-nu kaatum.
+Cooldown & pause live-la bot-oda sonna paper trades vechu work aagum; account mode-la simulate aagum.
+
 ### SMC backtest (sweep → MSS → FVG)
 Actions → Run workflow → mode **smc**. Swing low/high sweep → reclaim → MSS (structure break) → displacement FVG-la
 limit entry (edge / 50%), SL sweep-ku appuram. Exits: 1.5R, 2R, 3R, previous high/low (liquidity), trail 3 ATR.

@@ -914,11 +914,27 @@ def manage_smc(st, key, tr, candles):
             return
 
 
+def live_sequence_ok(st, sym, side):
+    """Cooldown / circuit-breaker rules, using the bot's own closed SMC trades."""
+    now = time.time()
+    losses = [c for c in st.get("closed", []) if c.get("strategy") == "smc" and c.get("r", 0) < 0]
+    if "SMC_COOLDOWN" in SMC_ACTIVE:
+        hrs = SMC_ACTIVE["SMC_COOLDOWN"]
+        if any(c["sym"] == sym and c["side"] == side and now - c["closed"] < hrs * 3600 for c in losses):
+            return False
+    if "SMC_BREAKER" in SMC_ACTIVE:
+        if sum(1 for c in losses if now - c["closed"] < 24 * 3600) >= SMC_ACTIVE["SMC_BREAKER"]:
+            return False
+    return True
+
+
 def scan_smc(st, sym, C, H, src, btc_fn=None):
     sent = 0
     n = len(C)
     for x in tag_btc(find_smc_setups(C, H, SMC_ENTRY, pending=True), sym, btc_fn):
         if not x.get("pending") or x["sig"] < n - SIGNAL_LOOKBACK or not smc_ok(x):
+            continue
+        if not live_sequence_ok(st, sym, x["side"]):
             continue
         if "SMC_MAX_FILL" in SMC_ACTIVE:                  # validated: only wait N candles for the fill
             x["expires_ct"] = min(x["expires_ct"],
@@ -937,7 +953,7 @@ def run_scan():
     st = load_state()
     sent, errors, cache = 0, [], {}
     btc_fn = None
-    if STRATEGY in ("smc", "both") and "SMC_BTC" in SMC_ACTIVE:
+    if STRATEGY in ("smc", "both") and any(v in SMC_ACTIVE for v in BTC_VARS):
         try:
             btc_fn = btc_trend_fn(fetch_klines("BTCUSDT", HTF, CANDLES)[0])
         except Exception as e:
@@ -1506,26 +1522,31 @@ def find_smc_setups(C, H, entry_mode="top", pending=False):
 
 
 def btc_trend_fn(HB):
-    """ct -> +1 (BTC 4h above EMA50), -1 (below) or 0 (unknown)."""
+    """ct -> (trend, adx, stable): trend +1/-1/0 = BTC 4h above/below EMA50/unknown,
+    adx = BTC 4h ADX, stable = no trend flip in the last 12 x 4h candles (2 days)."""
     hc = [x["c"] for x in HB]
     he = ema(hc, EMA_LEN)
     hct = [x["ct"] for x in HB]
+    hadx = adx([x["h"] for x in HB], [x["l"] for x in HB], hc)
+    sign = [0 if e is None else (1 if c > e else -1) for c, e in zip(hc, he)]
 
     def f(ct):
         k = bisect.bisect_right(hct, ct) - 1
-        if k < 0 or he[k] is None:
-            return 0
-        return 1 if hc[k] > he[k] else -1
+        if k < 0 or sign[k] == 0:
+            return 0, 99.0, True
+        win = sign[max(0, k - 11):k + 1]
+        return sign[k], hadx[k] if hadx[k] is not None else 99.0, all(v == sign[k] for v in win)
     return f
 
 
 def tag_btc(setups, sym, btc_fn):
     for x in setups:
-        if sym == "BTCUSDT" or btc_fn is None:
-            x["btc_ok"] = True
-        else:
-            tr = btc_fn(x["time"])
-            x["btc_ok"] = tr == 0 or (tr > 0) == (x["side"] == "LONG")
+        if btc_fn is None:
+            x["btc_ok"], x["btc_adx"], x["btc_stable"] = True, 99.0, True
+            continue
+        tr, bad, stable = btc_fn(x["time"])
+        x["btc_adx"], x["btc_stable"] = bad, stable
+        x["btc_ok"] = sym == "BTCUSDT" or tr == 0 or (tr > 0) == (x["side"] == "LONG")
     return setups
 
 
@@ -1541,7 +1562,30 @@ SMC_QUALITY = [
     ("Fill within 12 candles", "SMC_MAX_FILL", 12, lambda t, v: t["fill_wait"] is None or t["fill_wait"] <= v),
     ("Sweep volume ≥1.5× average", "SMC_MIN_VOL", 1.5, lambda t, v: t["vol"] >= v),
     ("BTC 4h trend agrees", "SMC_BTC", 1, lambda t, v: t["btc_ok"]),
+    # loss-fix candidates (from the losing-trade review)
+    ("Fix: BTC 4h ADX ≥20 (strong BTC trend)", "SMC_BTC_ADX", 20, lambda t, v: t.get("btc_adx", 99) >= v),
+    ("Fix: BTC trend stable 2 days (no flip)", "SMC_BTC_STABLE", 1, lambda t, v: t.get("btc_stable", True)),
+    ("Fix: SL ≥1.5% (no tight stops)", "SMC_MIN_SL", 1.5, lambda t, v: sl_pct(t) >= v),
+    ("Fix: SHORT only in coin 4h downtrend", "SMC_SHORT_TREND", 1, lambda t, v: t["side"] == "LONG" or t["trend"]),
+    ("Fix: coin cooldown 72h after SL", "SMC_COOLDOWN", 72, lambda t, v: t.get("cool_ok", True)),
+    ("Fix: pause after 3 SL in 24h", "SMC_BREAKER", 3, lambda t, v: t.get("breaker_ok", True)),
 ]
+BTC_VARS = ("SMC_BTC", "SMC_BTC_ADX", "SMC_BTC_STABLE")
+
+
+def tag_sequence(trades, ex, cooldown_h=72, breaker_n=3):
+    """Flags that depend on earlier results: cool_ok (no SL on this coin+side in the last
+    cooldown_h hours) and breaker_ok (fewer than breaker_n SLs in the last 24h, all coins)."""
+    losses = sorted([(t["close_ct"], t["sym"], t["side"]) for t in trades
+                     if t.get("close_ct") and t["res"].get(ex) is not None and t["res"][ex] < 0])
+    lct = [x[0] for x in losses]
+    for t in trades:
+        now = t["time"]
+        hi = bisect.bisect_right(lct, now)
+        recent = losses[bisect.bisect_left(lct, now - max(cooldown_h, 24) * 3600000):hi]
+        t["cool_ok"] = not any(sym == t["sym"] and side == t["side"] and now - ct < cooldown_h * 3600000
+                               for ct, sym, side in recent)
+        t["breaker_ok"] = sum(1 for ct, _, _ in recent if now - ct < 24 * 3600000) < breaker_n
 SMC_FILTERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "smc_filters.json")
 
 
@@ -1619,6 +1663,7 @@ def validate_quality(trades):
     cut = time.time() * 1000 - 60 * 86400000
     base = [t for t in trades if (not SMC_REQUIRE_DISCOUNT or t["discount"])
             and (not SMC_REQUIRE_TREND or t["trend"]) and passes_filters(t)]
+    tag_sequence(base, ex)
 
     def ev(sel):
         tr = _stats([t for t in sel if t["time"] < cut], ex, FEE_PCT)
@@ -1630,7 +1675,10 @@ def validate_quality(trades):
     for lbl, var, val, fn in SMC_QUALITY:
         n, avg, tn, tavg = ev([t for t in base if fn(t, val)])
         ok = n >= 60 and tn >= 20 and avg >= bavg + 0.02 and tavg > btavg and tavg > 0
-        rows.append(f"| {lbl} | {n} / {avg:+.2f}R | {tn} / {tavg:+.2f}R | {'✅' if ok else '❌'} |")
+        gone = [t for t in base if not fn(t, val) and t["res"].get(ex) is not None]
+        gl = sum(1 for t in gone if t["res"][ex] < 0)
+        rows.append(f"| {lbl} | {n} / {avg:+.2f}R | {tn} / {tavg:+.2f}R | {gl} losses / {len(gone) - gl} wins "
+                    f"| {'✅' if ok else '❌'} |")
         if ok:
             passed.append((avg, lbl, var, val))
     passed.sort(reverse=True)
@@ -1661,8 +1709,8 @@ def validate_quality(trades):
     table = ("### Quality filters: train / test validation\n\n"
              f"Baseline = live setup ({'discount' if SMC_REQUIRE_DISCOUNT else 'no discount'}), exit = {ex}, market fees. "
              "Train = before the last 60 days, test = last 60 days. Cells = trades / net R per trade.\n\n"
-             f"| Filter | Train | Test | Passed |\n|---|---|---|---|\n"
-             f"| **Baseline (no quality filter)** | {bn} / {bavg:+.2f}R | {btn} / {btavg:+.2f}R | |\n"
+             f"| Filter | Train | Test | Removed trades | Passed |\n|---|---|---|---|---|\n"
+             f"| **Baseline (no quality filter)** | {bn} / {bavg:+.2f}R | {btn} / {btavg:+.2f}R | | |\n"
              + "\n".join(rows) +
              f"\n\n**Applied to live signals:** {names} → train {cur[0]} / {cur[1]:+.2f}R, test {cur[2]} / {cur[3]:+.2f}R\n")
     msg = (f"\n<b>Quality filters (train → last 60 days test)</b>\n"
@@ -1696,6 +1744,8 @@ def run_smc_backtest(total):
                     continue
                 st["slp"], st["sym"] = sl_pct(st), sym
                 st["res"] = {lbl: f(C, st) for lbl, f in SMC_EXITS}
+                _, ci = _exit_detail(C, st, st["side"], "price", None, st["sl"])
+                st["close_ct"] = C[ci]["ct"] if ci is not None else None
                 groups[mode].append(st)
         print(f"{sym}: top {sum(1 for t in groups['top'] if t['sym'] == sym)}, "
               f"mid {sum(1 for t in groups['mid'] if t['sym'] == sym)} setups")
@@ -1838,7 +1888,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
 
     cands, coins, last_close = [], 0, {}
     btc_fn = None
-    if strategy == "smc" and "SMC_BTC" in SMC_ACTIVE:
+    if strategy == "smc" and any(v in SMC_ACTIVE for v in BTC_VARS):
         try:
             btc_fn = btc_trend_fn(fetch_history("BTCUSDT", HTF, max(need // 4 + EMA_LEN + 50, 300))[0])
         except Exception as e:
@@ -1905,6 +1955,8 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                     peak = max(peak, eq)
                     max_dd = max(max_dd, peak - eq)
 
+        loss_ev = []                                             # (close_ct, sym, side) of losing trades
+        skipped_rule = 0
         for c in cands:
             settle(c["t"])
             if c["sym"] in open_:
@@ -1913,6 +1965,17 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
             if free < margin:
                 skipped_cash += 1
                 continue
+            if strategy == "smc":
+                past = [e for e in loss_ev if e[0] <= c["t"]]
+                if "SMC_COOLDOWN" in SMC_ACTIVE and any(
+                        sm == c["sym"] and sd == c["side"] and c["t"] - ct0 < SMC_ACTIVE["SMC_COOLDOWN"] * 3600000
+                        for ct0, sm, sd in past):
+                    skipped_rule += 1
+                    continue
+                if "SMC_BREAKER" in SMC_ACTIVE and sum(
+                        1 for ct0, _, _ in past if c["t"] - ct0 < 24 * 3600000) >= SMC_ACTIVE["SMC_BREAKER"]:
+                    skipped_rule += 1
+                    continue
             px, ct = c["res"][lbl]
             free -= margin
             taken += 1
@@ -1925,6 +1988,8 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 open_[c["sym"]] = (ct, margin + p)
                 pnls.append(("closed", p))
                 wins += p > 0
+                if p < 0:
+                    loss_ev.append((ct, c["sym"], c["side"]))
                 liqs += c["liq"] and p <= -margin * 0.99
             if log_this:
                 tol = abs(c["entry"]) * 1e-6
@@ -1954,7 +2019,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
         results.append({"lbl": lbl, "final": final, "taken": taken, "closed": len(closed),
                         "open": len(open_), "unreal": unreal, "wins": wins, "fees": fees,
                         "dd": max_dd, "max_open": max_open, "skip_cash": skipped_cash,
-                        "skip_coin": skipped_coin, "best": max(closed, default=0),
+                        "skip_coin": skipped_coin, "skip_rule": skipped_rule, "best": max(closed, default=0),
                         "worst": min(closed, default=0), "streak": worst, "liqs": liqs})
 
     levs = [c["lev"] for c in cands] or [leverage]
@@ -1993,6 +2058,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 f"fees ${r['fees']:.2f}"
                 + (f", {r['open']} still open ({money(r['unreal'])})" if r["open"] else "")
                 + (f", skipped {r['skip_cash']} (no free balance)" if r["skip_cash"] else "")
+                + (f", {r['skip_rule']} blocked by cooldown/breaker" if r.get("skip_rule") else "")
                 + (f", {r['liqs']} liquidated" if r["liqs"] else "") + "\n")
     msg += "\nFunding & slippage not included. Full table: GitHub → Actions → run summary."
     tg(msg)
