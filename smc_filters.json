@@ -2,31 +2,30 @@
  "filters": {
   "SMC_KILLZONE": 1,
   "SMC_LDN_NY": 1,
-  "SMC_TGT_1R": 1.0,
-  "SMC_MAX_SL": 4
+  "SMC_TGT_1R": 1.0
  },
  "entry": "mid",
  "be": 0.0,
- "updated": "2026-09-29 16:32 UTC",
+ "updated": "2026-09-29 19:23 UTC",
  "exit": "Prev high/low (liquidity)",
  "baseline": {
   "train": [
-   363,
-   0.191
+   362,
+   0.188
   ],
   "test": [
-   96,
-   0.045
+   97,
+   0.038
   ]
  },
  "with_filters": {
   "train": [
-   82,
-   0.658
+   83,
+   0.616
   ],
   "test": [
    20,
-   0.757
+   0.629
   ]
  }
 }
