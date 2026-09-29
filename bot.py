@@ -1247,7 +1247,15 @@ def manage_smc(st, key, tr, candles):
             net = r - tr["fee_r"]
             usd = net * tr.get("usd_r", RISK_USD)
             what = "🎯 TP hit" if r > 0.3 else ("⚖️ breakeven" if tr.get("be") and r > -0.1 else "🛑 SL hit")
-            px = ev[1] * tr["fut"]["ratio"] if tr.get("fut") else ev[1]
+            px = ev[1]
+            if tr.get("fut"):                                  # show the futures level the user actually set
+                fu = tr["fut"]
+                if abs(ev[1] - tr["tp"]) <= abs(tr["tp"]) * 1e-9:
+                    px = fu["tp"]
+                elif abs(ev[1] - tr["sl"]) <= abs(tr["sl"]) * 1e-9:
+                    px = fu["sl"]
+                else:
+                    px = ev[1] * fu["ratio"]
             tg(f"🏁 {name} closed at <code>{fp(px)}</code> – {what}\n"
                f"Result: <b>{r:+.2f}R</b> (after fees ~{net:+.2f}R ≈ <b>{'+' if usd >= 0 else '−'}${abs(usd):.2f}</b>)")
             st["closed"].append({"sym": tr["sym"], "side": tr["side"], "tf": tr["tf"], "strategy": "smc",
@@ -1401,7 +1409,7 @@ def run_scan():
     now = datetime.now(IST)
     today = now.strftime("%Y-%m-%d")
     if now.hour >= HEARTBEAT_HOUR_IST and st["last_heartbeat"] != today:
-        msg = (f"✅ <b>S&D bot running</b>\nScanning {len(SYMBOLS)} coins on {TIMEFRAME} (+{HTF} trend)\n"
+        msg = (f"✅ <b>NKs SMC bot running</b>\nScanning {len(SYMBOLS)} coins on {TIMEFRAME} (+{HTF} trend)\n"
                f"Signals in last 24h: {sum(1 for v in st['sent'].values() if v > time.time() - 86400)}\n"
                f"Strategy: {STRATEGY.upper()} | open/pending trades: {len(st['open'])}\n\n📒 <b>Paper results</b>")
         for strat in (("smc", "sd") if STRATEGY == "both" else (STRATEGY,)):
