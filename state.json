@@ -1,28 +1,9 @@
 {
+ "cancelled": 1,
  "closed": [],
  "last_error_alert": 0,
- "last_heartbeat": "2026-09-29",
- "open": {
-  "QNTUSDT|LONG|smc|1h|1790643600000": {
-   "cancel": 288.23043575333725,
-   "entry": 230.97500000000002,
-   "expires_ct": 1790755199999,
-   "fee_r": 0.008068229573697282,
-   "kind": "smc",
-   "last_ct": 1790733599999,
-   "opened": 1790668799999,
-   "risk": 28.627717876668612,
-   "side": "LONG",
-   "sl": 202.3472821233314,
-   "slp": 12.394292835444793,
-   "source": "spot-vision",
-   "status": "pending",
-   "sym": "QNTUSDT",
-   "tf": "1h",
-   "tp": 373.0,
-   "usd_r": 0.6197146417722397
-  }
- },
+ "last_heartbeat": "2026-09-30",
+ "open": {},
  "sent": {
   "QNTUSDT|LONG|smc|1h|1790643600000": 1790672472
  }
