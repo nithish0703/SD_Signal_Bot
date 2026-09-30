@@ -1910,8 +1910,6 @@ def _smc_long(C, H, entry_mode, pending=False, unfilled=False):
         ob = next((k for k in range(m - 1, s - 1, -1) if cl[k] < o[k]), None)  # last down candle before MSS
         if entry_mode == "top":
             entry = zt
-        elif entry_mode == "bottom":                      # far edge of the FVG (scale-in test only)
-            entry = zb
         elif entry_mode == "ote":
             entry = leg_high - 0.705 * rng_leg
         elif entry_mode == "ob":
@@ -2787,76 +2785,6 @@ def _diag_missed(C, s, dg):
             return
 
 
-SCALE_PLANS = [("50% only (live)", {"mid": 1.0}), ("FVG edge only", {"top": 1.0}),
-               ("Scale-in 50/50 (edge + 50%)", {"top": 0.5, "mid": 0.5}),
-               ("Scale-in 30/70 (small starter)", {"top": 0.3, "mid": 0.7}),
-               ("Scale-in 1/3 each (edge + 50% + far edge)", {"top": 1 / 3, "mid": 1 / 3, "bottom": 1 / 3})]
-
-
-def _scale_legs(C, H, sym, btc_fn, start_ms, sc):
-    """ICT IOFED scale-in test. Signal = setup that passes the live filters with the live 50% entry
-    (filled or not). Each leg (edge / 50% / far edge) is a separate limit order with the same SL + liquidity TP."""
-    mids = [x for x in tag_btc(find_smc_setups(C, H, "mid", unfilled=True), sym, btc_fn)
-            if x["time"] >= start_ms and smc_ok(x)]
-    other = {m: {(x["side"], x["sweep_t"]): x for x in find_smc_setups(C, H, m)} for m in ("top", "bottom")}
-    for x in mids:
-        key = (x["side"], x["sweep_t"])
-        legs = {"mid": None if x.get("unfilled") else x, "top": other["top"].get(key),
-                "bottom": other["bottom"].get(key)}
-        res, open_ = {}, False
-        for name, lg in legs.items():
-            if lg is None:
-                continue
-            side = lg["side"]
-            E = _px(lg["entry"], side)
-            risk = E - _px(lg["sl"], side)
-            if risk <= 0:
-                continue
-            px, idx = _exit_detail(C, lg, side, "price", None, lg["sl"])
-            if px is None:
-                open_ = True
-                continue
-            fee_r = abs(lg["entry"]) * FEE_PCT / 100 / risk
-            res[name] = ((_px(px, side) - E) / risk - fee_r, C[idx]["ct"])
-        if open_:
-            continue
-        sc.append(res)
-
-
-def send_scale_report(sc, start_ms, days):
-    half = start_ms + days * 43200000
-    rows = []
-    for name, w in SCALE_PLANS:
-        ev = []
-        for res in sc:
-            got = [(w[k] * r, ct) for k, (r, ct) in res.items() if k in w]
-            if got:
-                ev.append((max(ct for _, ct in got), sum(r for r, _ in got)))
-        ev.sort()
-        tot = sum(r for _, r in ev)
-        h1 = sum(r for ct, r in ev if ct <= half)
-        eq = peak = dd = 0.0
-        streak = worst = 0
-        for _, r in ev:
-            eq += r
-            peak = max(peak, eq)
-            dd = min(dd, eq - peak)
-            streak = streak + 1 if r < 0 else 0
-            worst = max(worst, streak)
-        wins = sum(1 for _, r in ev if r > 0)
-        rows.append(f"<b>{name}</b>: {tot:+.1f}R | {len(ev)} trades, win {wins / max(1, len(ev)) * 100:.0f}% | "
-                    f"max DD {dd:.1f}R, loss streak {worst}\n1st half {h1:+.1f}R | 2nd half {tot - h1:+.1f}R")
-    msg = (f"🪜 <b>Scale-in test (ICT IOFED)</b> – last {days} days, {len(sc)} signals, same $ risk per signal, "
-           f"liquidity TP, fees {FEE_PCT:.2f}%\n\n" + "\n\n".join(rows)
-           + "\n\n1R = the full $ risk of one signal (e.g. $1). A leg that never fills risks nothing. "
-             "Report only – nothing changed.")
-    print(msg)
-    if os.getenv("GITHUB_STEP_SUMMARY"):
-        with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as fh:
-            fh.write("\n\n" + re.sub(r"</?b>", "**", msg).replace("\n", "  \n") + "\n")
-    tg(msg)
-
-
 def send_sl_tp_diag(dg, days):
     """Report: stop hunts (SL then TP) and missed winners (TP without fill)."""
     f, n_sl, u = dg["filled"], dg["sl"], dg["unfilled"]
@@ -2916,10 +2844,6 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
         mode = "risk"
     RISK_USD = risk
     strategy = strategy or ("smc" if STRATEGY == "both" else STRATEGY)
-    scale_test = strategy == "smc_scale"                         # + ICT scale-in (IOFED) comparison
-    if scale_test:
-        strategy = "smc"
-    sc = []
     if strategy == "smc":
         if SMC_BE:
             exits = [(f"Liquidity TP + BE {SMC_BE:g}R", "price_be", SMC_BE), ("Liquidity TP (no BE)", "price", None),
@@ -2962,8 +2886,6 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 for x in tag_btc(find_smc_setups(C, H, SMC_ENTRY, unfilled=True), sym, btc_fn):
                     if x.get("unfilled") and x["time"] >= start_ms and smc_ok(x):
                         _diag_missed(C, x, dg)
-                if scale_test:
-                    _scale_legs(C, H, sym, btc_fn, start_ms, sc)
             except Exception as e:
                 print("diag error", sym, e)
         else:
@@ -3156,8 +3078,6 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     send_trade_log(trade_log, balance, exits[0][0], days)
     if strategy == "smc":
         send_sl_tp_diag(dg, days)
-    if scale_test:
-        send_scale_report(sc, start_ms, days)
 
 
 def main():
@@ -3176,8 +3096,7 @@ def main():
                     help="risk = same $ loss per trade (default), fixed = margin x leverage, "
                          "compound = --risk is a %% of the current balance")
     ap.add_argument("--risk", type=float, default=1.0, help="$ loss at SL in risk sizing")
-    ap.add_argument("--strategy", choices=["smc", "smc_scale", "sd", ""], default="",
-                    help="account mode strategy (smc_scale = smc + ICT scale-in entry comparison)")
+    ap.add_argument("--strategy", choices=["smc", "sd", ""], default="", help="account mode strategy")
     ap.add_argument("--top-n", type=int, default=0, help="account/backtest: number of top futures coins")
     ap.add_argument("--entry", choices=["default", "mid", "top", "ote", "ob", ""], default="",
                     help="smc/account: entry model to test (mid = FVG 50%%, top = FVG edge, ote = ICT OTE, ob = order block)")
