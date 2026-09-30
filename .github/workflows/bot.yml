@@ -35,9 +35,9 @@ on:
         description: "account / smc mode: number of top futures coins (live scan is not affected)"
         default: "50"
       strategy:
-        description: "account mode: strategy to simulate"
+        description: "account mode: strategy to simulate (smc_scale = smc + ICT scale-in entry comparison)"
         type: choice
-        options: [smc, sd]
+        options: [smc, smc_scale, sd]
         default: smc
       entry:
         description: "smc / account mode: entry model (default = what smc_filters.json says, mid = FVG 50%, top = FVG edge, ote = ICT OTE 70.5%, ob = ICT order block)"
