@@ -383,33 +383,7 @@ def regime_by_year(raw, adx_at):
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------- Donchian account simulation
-def donchian_legs(D):
-    """Long legs per lookback (same rules as donchian_positions): (N, entry_idx, exit_idx or None).
-    Entry and exit at the daily close."""
-    cl = [x["c"] for x in D]
-    legs = []
-    for N in DONCHIAN_N:
-        inpos, stop, ei = False, None, None
-        for i in range(N, len(cl)):
-            hi = max(cl[i - N:i])
-            w2 = cl[i - N + 1:i + 1]
-            mid = (max(w2) + min(w2)) / 2
-            if not inpos and cl[i] > hi:
-                inpos, stop, ei = True, mid, i
-            elif inpos:
-                stop = max(stop, mid)
-                if cl[i] < stop:
-                    legs.append((N, ei, i))
-                    inpos = False
-        if inpos:
-            legs.append((N, ei, None))
-    return legs
-
-
-MIN_NOTIONAL = 5.0          # Binance USDT-M minimum order value for most coins (BTC/ETH need more)
-
-
+# ---------------------------------------------------------------- point-in-time universe
 def pit_universe(D1, start_ms, end_ms, k):
     """Point-in-time universe: at the start of every month, the top-k coins by the previous 30 days'
     dollar volume, among coins that already had 1 year of daily history. -> {'YYYY-MM': set(syms)}"""
@@ -434,145 +408,92 @@ def pit_universe(D1, start_ms, end_ms, k):
     return out
 
 
-def donchian_account(D1, syms, start_ms, end_ms, balance, scale, legs_cache, lookbacks=None, universe=None, k=None):
-    """Real account: every (coin, lookback) breakout is one leg, sized ONCE at entry
-    (equity x scale x 1/len(lookbacks) x vol-target / k) and held until its trailing stop (no daily resizing).
-    universe: {'YYYY-MM': set} -> new legs only for coins in that month's universe (point-in-time).
-    Compounding, fees 0.05%/side, longs pay 0.01%/8h funding, marked to market daily."""
-    lookbacks = lookbacks or DONCHIAN_N
+# ---------------------------------------------------------------- time-series momentum (AQR / Liu-Tsyvinski)
+def tsmom_daily(D1, syms, start_ms, end_ms, lookbacks, long_only, scale, universe=None, k=None):
+    """Hurst, Ooi & Pedersen (AQR) time-series momentum: signal = average sign of the past returns over each
+    lookback (days); size = signal x min(25% / 90-day vol, 2) / k x scale. Rebalanced weekly (Monday close),
+    weights held in between. universe: point-in-time {'YYYY-MM': set} (None = all syms).
+    Fees 0.05% x |weight change|, longs pay 0.01%/8h funding. -> ({day: return}, avg gross exposure, orders/month)"""
     k = k or len(syms)
-    legs, ev = [], {}
+    data = {}
     for sym in syms:
         D = D1[sym]
         if len(D) < 400:
             continue
-        if sym not in legs_cache:
-            legs_cache[sym] = donchian_legs(D)
         cl = [x["c"] for x in D]
-        rets = [0.0] + [cl[i] / cl[i - 1] - 1 for i in range(1, len(cl))]
-        for N, ei, xi in legs_cache[sym]:
-            if N not in lookbacks or ei < 365 or D[ei]["t"] < start_ms:
-                continue                                   # 1 year of history; the account starts flat
-            if universe is not None:
-                mk = datetime.fromtimestamp(D[ei]["t"] / 1000, timezone.utc).strftime("%Y-%m")
-                if sym not in universe.get(mk, ()):
-                    continue
-            win = rets[ei - 89:ei + 1]
-            m = sum(win) / 90
-            sd = math.sqrt(sum((r - m) ** 2 for r in win) / 89) * math.sqrt(365)
-            vs = min(0.25 / sd, 2.0) if sd > 0 else 0.0
-            L = {"sym": sym, "e_px": cl[ei], "e_t": D[ei]["t"], "vs": vs,
-                 "x_px": cl[xi] if xi is not None else None, "x_t": D[xi]["t"] if xi is not None else None}
-            legs.append(L)
-            ev.setdefault(L["e_t"], []).append(("e", len(legs) - 1))
-            if xi is not None:
-                ev.setdefault(L["x_t"], []).append(("x", len(legs) - 1))
-    px = {sym: {x["t"]: x["c"] for x in D1[sym]} for sym in syms}
-    last = {}
-    cash, open_ = balance, {}
-    peak, mdd, eq, prev_eq = balance, 0.0, balance, balance
-    months, closed, sizes, orders, max_expo = {}, [], [], {}, 0.0
+        data[sym] = ({x["t"]: i for i, x in enumerate(D)}, cl)
+    w = {sym: 0.0 for sym in data}
+    daily, expo, orders, months = {}, [], 0, set()
     d = start_ms // DAY * DAY
     while d <= end_ms:
-        for sym in syms:
-            if d in px[sym]:
-                last[sym] = px[sym][d]
-        todays = ev.get(d, [])
-        for kind, lid in todays:
-            if kind == "x" and lid in open_:
-                L, notional = legs[lid], open_.pop(lid)
-                held = (L["x_t"] - L["e_t"]) / DAY
-                cash += (notional * (L["x_px"] / L["e_px"] - 1) - notional * 2 * FEE_SIDE
-                         - notional * FUND_8H * 3 * held)
-                closed.append(notional * (L["x_px"] / L["e_px"] - 1))
-        unreal = sum(n_ * (last.get(legs[l]["sym"], legs[l]["e_px"]) / legs[l]["e_px"] - 1) for l, n_ in open_.items())
-        eq = cash + unreal
-        for kind, lid in todays:
-            if kind == "e" and eq > 0:
-                notional = eq * scale * (1 / len(lookbacks)) * legs[lid]["vs"] / k
-                open_[lid] = notional
-                sizes.append(notional / eq)                # as a fraction of equity
-            orders[(legs[lid]["sym"], d)] = 1
-        unreal = sum(n_ * (last.get(legs[l]["sym"], legs[l]["e_px"]) / legs[l]["e_px"] - 1) for l, n_ in open_.items())
-        eq = cash + unreal
-        if eq > 0:
-            max_expo = max(max_expo, sum(open_.values()) / eq)
-        peak = max(peak, eq)
-        mdd = min(mdd, eq / peak - 1)
-        mk = datetime.fromtimestamp(d / 1000, timezone.utc).strftime("%Y-%m")
-        if mk not in months:
-            months[mk] = {"start": prev_eq, "end": eq, "peak": eq, "dd": 0.0}
-        mo = months[mk]
-        mo["end"] = eq
-        mo["peak"] = max(mo["peak"], eq)
-        mo["dd"] = min(mo["dd"], eq - mo["peak"])
-        prev_eq = eq
+        # 1. P&L of today's move with the weights held since the last close
+        tot = 0.0
+        for sym, (idx, cl) in data.items():
+            j = idx.get(d)
+            if j is None or j == 0 or w[sym] == 0:
+                continue
+            tot += w[sym] * (cl[j] / cl[j - 1] - 1)
+            if w[sym] > 0:
+                tot -= w[sym] * FUND_8H * 3
+        # 2. weekly rebalance at Monday's close
+        if datetime.fromtimestamp(d / 1000, timezone.utc).weekday() == 0:
+            mk = datetime.fromtimestamp(d / 1000, timezone.utc).strftime("%Y-%m")
+            months.add(mk)
+            allowed = universe.get(mk, set()) if universe is not None else set(data)
+            for sym, (idx, cl) in data.items():
+                j = idx.get(d)
+                new = 0.0
+                if j is not None and j >= 365 and sym in allowed:
+                    sig = sum((1 if cl[j] > cl[j - L] else -1 if cl[j] < cl[j - L] else 0) for L in lookbacks) / len(lookbacks)
+                    if long_only:
+                        sig = max(sig, 0.0)
+                    rets = [cl[i] / cl[i - 1] - 1 for i in range(j - 89, j + 1)]
+                    m = sum(rets) / 90
+                    sd = math.sqrt(sum((r - m) ** 2 for r in rets) / 89) * math.sqrt(365)
+                    new = sig * (min(0.25 / sd, 2.0) if sd > 0 else 0.0) / k * scale
+                if abs(new - w[sym]) > 1e-12:
+                    tot -= abs(new - w[sym]) * FEE_SIDE
+                    if (new == 0) != (w[sym] == 0) or (new > 0) != (w[sym] > 0):
+                        orders += 1
+                    w[sym] = new
+        daily[d] = tot
+        expo.append(sum(abs(v) for v in w.values()))
         d += DAY
-    n_days = max(1.0, (end_ms - start_ms) / DAY)
-    ss = sorted(sizes)
-    p10 = ss[len(ss) // 10] if ss else 0.0
-    years = {}
-    for mk, mo in months.items():
-        y = mk[:4]
-        years.setdefault(y, [mo["start"], mo["end"]])[1] = mo["end"]
-    return {"final": eq, "cagr": (eq / balance) ** (365 / n_days) - 1 if eq > 0 else -1.0, "mdd": mdd,
-            "months": months, "years": {y: v[1] / v[0] - 1 for y, v in years.items()},
-            "closed": len(closed), "wins": sum(1 for p in closed if p > 0),
-            "p10": p10, "orders_pm": len(orders) / max(1, len(months)), "max_expo": max_expo, "legs": len(sizes)}
+    return daily, (sum(expo) / len(expo) if expo else 0.0), orders / max(1, len(months))
 
 
-PRACTICAL_N = [20, 60, 150]
-
-
-def run_donchian_account(D1, start_ms, end_ms, balance, days):
+def run_tsmom(D1, start_ms, end_ms, days):
     pool = [s for s in bot.SYMBOLS if s in D1]
-    cache = {}
-    u20 = pit_universe(D1, start_ms, end_ms, 20)
     u10 = pit_universe(D1, start_ms, end_ms, 10)
-    avg20 = sum(len(v) for v in u20.values()) / max(1, len(u20))
-    configs = [
-        ("A. Point-in-time top 20, 9 lookbacks (paper)", DONCHIAN_N, u20, 20),
-        ("B. Point-in-time top 10, 9 lookbacks", DONCHIAN_N, u10, 10),
-        ("C. Point-in-time top 20, 3 lookbacks 20/60/150 (practical)", PRACTICAL_N, u20, 20),
-        ("D. Point-in-time top 10, 3 lookbacks 20/60/150 (practical)", PRACTICAL_N, u10, 10),
-        ("Ref: TODAY's top 20, 9 lookbacks (biased – for comparison)", DONCHIAN_N, None, 20),
-    ]
-    lines = [f"💼 <b>Donchian long-only – bias check + practical version</b> (last {days} days, ${balance:g} start, "
-             f"pool = today's top {len(pool)}, avg {avg20:.0f} coins eligible for top 20)",
-             "Point-in-time = each month the top coins by the previous 30 days' volume at that time (coins need 1 year "
-             "of history). Legs sized once at entry, compounding, fees 0.05%/side, longs pay 0.01%/8h funding."]
-    detail = None
-    for name, lbs, uni, k in configs:
-        syms = pool[:20] if uni is None else pool
-        lines.append(f"\n<b>{name}</b>")
-        r3 = None
-        for sc in (1, 2, 3):
-            r = donchian_account(D1, syms, start_ms, end_ms, balance, sc, cache, lbs, uni, k)
-            yrs = " ".join(f"{y}:{v * 100:+.0f}%" for y, v in r["years"].items())
-            lines.append(f"{sc}x: ${balance:g} → <b>${r['final']:.2f}</b> (CAGR {r['cagr'] * 100:+.1f}%) | "
-                         f"max DD {r['mdd'] * 100:.1f}% | {yrs}")
-            if sc == 3:
-                r3 = r
-        need = MIN_NOTIONAL / r3["p10"] if r3["p10"] > 0 else 0.0
-        lines.append(f"~{r3['orders_pm']:.0f} orders/month, win {r3['wins'] / max(1, r3['closed']) * 100:.0f}% of closed legs, "
-                     f"max exposure {r3['max_expo'] * 100:.0f}% at 3x; capital for 90% of orders ≥ ${MIN_NOTIONAL:g} at 3x: "
-                     f"~${need:,.0f}")
-        if name.startswith("C."):
-            detail = (name, r3)
-    out = ["\n".join(lines)]
-    if detail:
-        name, r = detail
-        rows = [f"📅 <b>Month by month – {name.split(' (')[0]}, 3x</b> (${balance:g} start)"]
-        pos = 0
-        for mk, mo in r["months"].items():
-            pnl = mo["end"] - mo["start"]
-            pos += pnl > 0
-            rows.append(f"{'🟢' if pnl > 0 else '🔴' if pnl < 0 else '⚪'} {mk}: {'+' if pnl >= 0 else '−'}${abs(pnl):.2f} "
-                        f"({pnl / mo['start'] * 100 if mo['start'] else 0:+.1f}%) | DD −${abs(mo['dd']):.2f} | "
-                        f"${mo['start']:.2f} → ${mo['end']:.2f}")
-        rows.append(f"\nProfitable months: <b>{pos}/{len(r['months'])}</b>")
-        out.append("\n".join(rows))
-    return out
+    u20 = pit_universe(D1, start_ms, end_ms, 20)
+    bh = {}
+    B = D1["BTCUSDT"]
+    for i in range(1, len(B)):
+        bh[B[i]["t"]] = B[i]["c"] / B[i - 1]["c"] - 1
+    lines = [f"📈 <b>Trend following – time-series momentum</b> (last {days} days)",
+             "AQR rule: long if past return > 0, short if < 0, averaged over 1, 3 and 12 months; crypto rule "
+             "(Liu & Tsyvinski): 1, 2 and 4 weeks. 25% vol target per coin, weekly rebalance, fees + funding. "
+             "Point-in-time top-N universes (no hindsight). Orders = coins that open / close / flip a position.",
+             "\n" + fmt("Benchmark: BTC buy & hold", stats(fill_days(bh, start_ms, end_ms), start_ms))]
+    btceth = [s for s in ("BTCUSDT", "ETHUSDT") if s in D1]
+    configs = [("BTC + ETH, AQR 1/3/12m", btceth, None, 2, [30, 91, 365]),
+               ("PIT top 10, AQR 1/3/12m", pool, u10, 10, [30, 91, 365]),
+               ("PIT top 20, AQR 1/3/12m", pool, u20, 20, [30, 91, 365]),
+               ("PIT top 10, crypto 1/2/4 weeks", pool, u10, 10, [7, 14, 28]),
+               ("PIT top 20, crypto 1/2/4 weeks", pool, u20, 20, [7, 14, 28])]
+    for name, syms, uni, k, lbs in configs:
+        for lo in (False, True):
+            tag = "long-only" if lo else "long + short"
+            for sc in (1, 3):
+                dd_, ex, opm = tsmom_daily(D1, syms, start_ms, end_ms, lbs, lo, sc, uni, k)
+                st = stats(fill_days(dd_, start_ms, end_ms), start_ms)
+                if sc == 1:
+                    lines.append("\n" + fmt(f"{name}, {tag}", st, f" · avg exposure {ex * 100:.0f}% · ~{opm:.0f} orders/month"))
+                else:
+                    lines.append(f"3x: CAGR {st['cagr'] * 100:+.1f}% | max DD {st['mdd'] * 100:.1f}% | "
+                                 + " ".join(f"{y}:{v * 100:+.0f}%" for y, v in st["years"].items()))
+    msg = "\n".join(lines)
+    return [msg[i:i + 3900] for i in range(0, len(msg), 3900)]
 
 
 # ---------------------------------------------------------------- report
@@ -596,7 +517,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=1000)
     ap.add_argument("--top-n", type=int, default=50)
-    ap.add_argument("--account", action="store_true", help="Donchian long-only account backtest only")
+    ap.add_argument("--account", action="store_true", help="time-series momentum (trend following) test only")
     ap.add_argument("--balance", type=float, default=100)
     args = ap.parse_args()
     bot.DATA_SOURCE = "futures"
@@ -620,16 +541,16 @@ def main():
                 print(f"{sym}: {len(D1[sym])} d")
             del C
         if "BTCUSDT" not in D1:
-            bot.tg("⚠️ Donchian account: no BTC data")
+            bot.tg("⚠️ Trend following test: no BTC data")
             return
         end_ms = D1["BTCUSDT"][-1]["t"]
-        msgs = run_donchian_account(D1, start_ms, end_ms, args.balance, days)
+        msgs = run_tsmom(D1, start_ms, end_ms, days)
         for m_ in msgs:
             bot.tg(m_)
             print(m_)
         if os.getenv("GITHUB_STEP_SUMMARY"):
             with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as fh:
-                fh.write("## Donchian account\n\n" + re.sub(r"</?b>", "**", "\n\n".join(msgs)).replace("\n", "  \n") + "\n")
+                fh.write("## Trend following (time-series momentum)\n\n" + re.sub(r"</?b>", "**", "\n\n".join(msgs)).replace("\n", "  \n") + "\n")
         return
     for sym in bot.SYMBOLS:
         try:
