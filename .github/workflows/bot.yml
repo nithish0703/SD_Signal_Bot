@@ -1,23 +1,56 @@
-name: FX Signal Bot
+name: S&D Signal Bot
 
 on:
   schedule:
-    - cron: "7 * * * *"        # watchdog only: GitHub cron is often hours late. The live check runs in a
+    - cron: "7 * * * *"        # watchdog only: GitHub cron is often hours late. The live scan runs in a
                                # ~5.5h loop (every 15 min) that starts its own successor when it ends.
   workflow_dispatch:
     inputs:
       mode:
-        description: "scan = normal live run (loop), test = send an FX bot status message"
+        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing)"
         type: choice
-        options: [scan, test]
+        options: [scan, test, backtest, account, amd, smc, smc_futures, account_futures]
         default: scan
+      balance:
+        description: "account mode: starting balance ($)"
+        default: "100"
+      margin:
+        description: "account mode: margin per trade ($)"
+        default: "5"
+      leverage:
+        description: "account mode: leverage (x)"
+        default: "10"
+      days:
+        description: "account mode: last N days"
+        default: "30"
+      sizing:
+        description: "account mode: risk = same $ loss every trade (like live signals), fixed = margin x leverage, compound = 'risk' is a % of the current balance"
+        type: choice
+        options: [risk, fixed, compound]
+        default: risk
+      risk:
+        description: "account mode: $ loss if SL is hit (risk sizing) or % of balance (compound sizing)"
+        default: "1"
+      coins:
+        description: "account / smc mode: number of top futures coins (live scan is not affected)"
+        default: "50"
+      strategy:
+        description: "account mode: strategy to simulate"
+        type: choice
+        options: [smc, sd]
+        default: smc
+      entry:
+        description: "smc / account mode: entry model (default = what smc_filters.json says, mid = FVG 50%, top = FVG edge, ote = ICT OTE 70.5%, ob = ICT order block)"
+        type: choice
+        options: [default, mid, top, ote, ob]
+        default: default
 
 permissions:
   contents: write
-  actions: write      # lets the loop start the next loop run (workflow_dispatch)
+  actions: write      # lets the scan loop start the next loop run (workflow_dispatch)
 
 concurrency:
-  group: sd-signal-bot-${{ github.ref_name }}   # same group as before, so old and new loops never run together
+  group: sd-signal-bot-${{ github.ref_name }}   # dev test runs never block the live bot on main
   cancel-in-progress: false
 
 jobs:
@@ -34,46 +67,137 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Run FX bot
+      - name: Run bot
         timeout-minutes: 350
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          SYMBOLS: ${{ vars.SYMBOLS }}
+          TOP_N: ${{ vars.TOP_N }}
+          COIN_SELECT: ${{ vars.COIN_SELECT }}
+          COIN_POOL: ${{ vars.COIN_POOL }}
+          MIN_SCORE: ${{ vars.MIN_SCORE }}
+          MIN_SL_PCT: ${{ vars.MIN_SL_PCT }}
+          FEE_PCT: ${{ vars.FEE_PCT }}
+          TIMEFRAME: ${{ vars.TIMEFRAME }}
+          HTF: ${{ vars.HTF }}
+          TRAIL_ATR: ${{ vars.TRAIL_ATR }}
+          MARGIN_USD: ${{ vars.MARGIN_USD }}
+          RISK_USD: ${{ vars.RISK_USD }}
+          MAX_LEVERAGE: ${{ vars.MAX_LEVERAGE }}
+          STRATEGY: ${{ vars.STRATEGY }}
+          SMC_ENTRY: ${{ vars.SMC_ENTRY }}
+          SMC_REQUIRE_DISCOUNT: ${{ vars.SMC_REQUIRE_DISCOUNT }}
+          SMC_REQUIRE_TREND: ${{ vars.SMC_REQUIRE_TREND }}
+          SMC_MIN_DISP: ${{ vars.SMC_MIN_DISP }}
+          SMC_MIN_FVG: ${{ vars.SMC_MIN_FVG }}
+          SMC_EQUAL_LEVELS: ${{ vars.SMC_EQUAL_LEVELS }}
+          SMC_SESSION: ${{ vars.SMC_SESSION }}
+          SMC_HTF_POI: ${{ vars.SMC_HTF_POI }}
+          SMC_MIN_RR: ${{ vars.SMC_MIN_RR }}
+          SMC_MAX_FILL: ${{ vars.SMC_MAX_FILL }}
+          SMC_MIN_VOL: ${{ vars.SMC_MIN_VOL }}
+          SMC_BTC: ${{ vars.SMC_BTC }}
+          SMC_BTC_ADX: ${{ vars.SMC_BTC_ADX }}
+          SMC_BTC_STABLE: ${{ vars.SMC_BTC_STABLE }}
+          SMC_MIN_SL: ${{ vars.SMC_MIN_SL }}
+          SMC_SHORT_TREND: ${{ vars.SMC_SHORT_TREND }}
+          SMC_COOLDOWN: ${{ vars.SMC_COOLDOWN }}
+          SMC_BREAKER: ${{ vars.SMC_BREAKER }}
+          SMC_MSS_CLOSE: ${{ vars.SMC_MSS_CLOSE }}
+          SMC_MSS_MARGIN: ${{ vars.SMC_MSS_MARGIN }}
+          SMC_MAX_DEPTH: ${{ vars.SMC_MAX_DEPTH }}
+          SMC_SWEEP_REJECT: ${{ vars.SMC_SWEEP_REJECT }}
+          SMC_MSS_VOL: ${{ vars.SMC_MSS_VOL }}
+          SMC_MSS_FAST: ${{ vars.SMC_MSS_FAST }}
+          SMC_TGT_1R: ${{ vars.SMC_TGT_1R }}
+          SMC_BE: ${{ vars.SMC_BE }}
+          SMC_ADX: ${{ vars.SMC_ADX }}
+          SMC_CHOP: ${{ vars.SMC_CHOP }}
+          SMC_TREND: ${{ vars.SMC_TREND }}
+          SMC_MSS_FAST4: ${{ vars.SMC_MSS_FAST4 }}
+          SMC_ABSORB: ${{ vars.SMC_ABSORB }}
+          SMC_MSS_FLOW: ${{ vars.SMC_MSS_FLOW }}
+          SMC_THIN_HOURS: ${{ vars.SMC_THIN_HOURS }}
+          SMC_NO_WEEKEND: ${{ vars.SMC_NO_WEEKEND }}
+          SMC_VOL_BAND: ${{ vars.SMC_VOL_BAND }}
+          SMC_MAX_SL: ${{ vars.SMC_MAX_SL }}
+          SMC_NO_ASIA: ${{ vars.SMC_NO_ASIA }}
+          SMC_NO_LATE_US: ${{ vars.SMC_NO_LATE_US }}
+          SMC_LDN_NY: ${{ vars.SMC_LDN_NY }}
+          SMC_KILLZONE: ${{ vars.SMC_KILLZONE }}
+          SMC_PDL: ${{ vars.SMC_PDL }}
+          SMC_MIDNIGHT: ${{ vars.SMC_MIDNIGHT }}
+          SMC_OTE_FVG: ${{ vars.SMC_OTE_FVG }}
+          SMC_HAS_OB: ${{ vars.SMC_HAS_OB }}
+          FILTER_HTF_ADX: ${{ vars.FILTER_HTF_ADX }}
+          FILTER_ADX: ${{ vars.FILTER_ADX }}
+          FILTER_CHOP: ${{ vars.FILTER_CHOP }}
+          FILTER_SLOPE: ${{ vars.FILTER_SLOPE }}
         run: |
           MODE="${{ github.event.inputs.mode }}"
-          if [ "$MODE" = "test" ]; then python fx_bot.py --test; exit 0; fi
-          # Live loop: check now, then at :01 :16 :31 :46 UTC.
-          # main = 330 min then hand over to a new run; other branches = 35 min test, nothing saved.
-          BRANCH="${{ github.ref_name }}"
-          if [ "$BRANCH" = "main" ]; then LOOP_MIN=330; else LOOP_MIN=35; fi
-          END=$(( $(date +%s) + LOOP_MIN * 60 ))
-          git config user.name "fx-signal-bot"
-          git config user.email "fx-signal-bot@users.noreply.github.com"
-          FIRST=1
-          while true; do
-            if [ $FIRST -eq 0 ]; then
-              NOW=$(date +%s); M=$(( (NOW / 60) % 60 ))
-              for T in 1 16 31 46 61; do if [ $T -gt $M ]; then NEXT=$T; break; fi; done
-              WAIT=$(( (NEXT - M) * 60 - NOW % 60 ))
-              if [ $(( NOW + WAIT )) -ge $END ]; then break; fi
-              sleep $WAIT
-            fi
-            FIRST=0
-            [ "$BRANCH" = "main" ] && { git pull --rebase --autostash -q || true; }
-            echo "===== check $(date -u '+%F %T') UTC ====="
-            timeout 3m python fx_bot.py || echo "fx bot failed, continuing"
-            if [ "$BRANCH" = "main" ]; then
-              [ -f fx_state.json ] && git add fx_state.json
-              if ! git diff --cached --quiet; then
-                git commit -qm "fx bot: update state"
-                git pull --rebase --autostash -q || true
-                git push -q || true
+          if [ "$MODE" = "test" ]; then python bot.py --test
+          elif [ "$MODE" = "backtest" ]; then python bot.py --backtest --candles 6000
+          elif [ "$MODE" = "amd" ]; then python bot.py --amd --candles 6000
+          elif [ "$MODE" = "smc" ]; then python bot.py --smc --candles 6000 --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
+          elif [ "$MODE" = "smc_futures" ]; then python bot.py --smc --data futures --candles 6000 --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
+          elif [ "$MODE" = "account" ] || [ "$MODE" = "account_futures" ]; then
+            DATA=spot; [ "$MODE" = "account_futures" ] && DATA=futures
+            python bot.py --account --data "$DATA" \
+              --balance "${{ github.event.inputs.balance }}" --margin "${{ github.event.inputs.margin }}" \
+              --leverage "${{ github.event.inputs.leverage }}" --days "${{ github.event.inputs.days }}" \
+              --sizing "${{ github.event.inputs.sizing }}" --risk "${{ github.event.inputs.risk }}" \
+              --strategy "${{ github.event.inputs.strategy }}" --top-n "${{ github.event.inputs.coins }}" \
+              --entry "${{ github.event.inputs.entry }}"
+          else
+            # Live scan loop: scan now, then at :01 :16 :31 :46 UTC (just after each candle close).
+            # main = 330 min then hand over to a new run; other branches = 35 min test, nothing saved.
+            BRANCH="${{ github.ref_name }}"
+            if [ "$BRANCH" = "main" ]; then LOOP_MIN=330; else LOOP_MIN=35; fi
+            END=$(( $(date +%s) + LOOP_MIN * 60 ))
+            git config user.name "sd-signal-bot"
+            git config user.email "sd-signal-bot@users.noreply.github.com"
+            FIRST=1
+            while true; do
+              if [ $FIRST -eq 0 ]; then
+                NOW=$(date +%s); M=$(( (NOW / 60) % 60 ))
+                for T in 1 16 31 46 61; do if [ $T -gt $M ]; then NEXT=$T; break; fi; done
+                WAIT=$(( (NEXT - M) * 60 - NOW % 60 ))
+                if [ $(( NOW + WAIT )) -ge $END ]; then break; fi
+                sleep $WAIT
               fi
-            fi
-          done
+              FIRST=0
+              [ "$BRANCH" = "main" ] && { git pull --rebase --autostash -q || true; }
+              echo "===== scan $(date -u '+%F %T') UTC ====="
+              timeout 12m python bot.py || echo "scan failed, continuing"
+              if [ "$BRANCH" = "main" ]; then
+                git add state.json
+                [ -f coin_universe.json ] && git add coin_universe.json
+                if ! git diff --cached --quiet; then
+                  git commit -qm "bot: update state"
+                  git pull --rebase --autostash -q || true
+                  git push -q || true
+                fi
+              fi
+            done
+          fi
 
-      - name: Start next loop (keeps the bot running 24/7)
+      - name: Save state (stops duplicate signals)
+        if: (github.event.inputs.mode == '' || github.event.inputs.mode == 'scan' || github.event.inputs.mode == 'smc') && (github.ref_name == 'main' || github.event.inputs.mode == 'smc')
+        run: |
+          git config user.name "sd-signal-bot"
+          git config user.email "sd-signal-bot@users.noreply.github.com"
+          if [ "${{ github.ref_name }}" = "main" ]; then git add state.json; fi   # live paper trades only on main
+          if [ -f smc_filters.json ]; then git add smc_filters.json; fi
+          if [ -f coin_universe.json ]; then git add coin_universe.json; fi
+          if ! git diff --cached --quiet; then
+            git commit -m "bot: update state"
+            git pull --rebase --autostash || true
+            git push || true
+          fi
+
+      - name: Start next scan loop (keeps the bot running 24/7)
         if: (success() || failure()) && github.ref_name == 'main' && (github.event.inputs.mode == '' || github.event.inputs.mode == 'scan')
         env:
           GH_TOKEN: ${{ github.token }}
