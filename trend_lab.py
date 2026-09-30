@@ -325,6 +325,64 @@ def smc_trades(C, H, sym, start_ms):
     return out
 
 
+def raw_smc(C, H, sym, start_ms):
+    """All SMC setups (no quality filter yet) with their liquidity-TP result: (setup, open_ms, close_ms, R)."""
+    out = []
+    for x in bot.tag_btc(bot.find_smc_setups(C, H, bot.SMC_ENTRY), sym, None):
+        if x["time"] < start_ms:
+            continue
+        side = x["side"]
+        E = bot._px(x["entry"], side)
+        risk = E - bot._px(x["sl"], side)
+        if risk <= 0:
+            continue
+        px, idx = bot._exit_detail(C, x, side, "price", None, x["sl"])
+        if px is None:
+            continue
+        fee_r = abs(x["entry"]) * bot.FEE_PCT / 100 / risk
+        out.append((x, x["time"], C[idx]["ct"], (bot._px(px, side) - E) / risk - fee_r))
+    return out
+
+
+def smc_pass(x, active):
+    if bot.SMC_REQUIRE_DISCOUNT and not x["discount"]:
+        return False
+    if bot.SMC_REQUIRE_TREND and not x["trend"]:
+        return False
+    return bot.sl_pct(x) >= bot.MIN_SL_PCT and bot.passes_filters(x) and bot.smc_quality_ok(x, active)
+
+
+COMBO_3Y = {"SMC_MIN_RR": 1.5, "SMC_SWEEP_REJECT": 1, "SMC_ABSORB": 0.55, "SMC_MAX_SL": 4}
+
+
+def regime_by_year(raw, adx_at):
+    """Pre-registered test: SMC only when BTC daily ADX >= level. Pass = gated R/trade > 0 AND better than
+    ungated in every full year, for ADX 20, 25 and 30 alike."""
+    sets = [("Live filters", dict(bot.SMC_ACTIVE)), ("No quality filter (discount only)", {}),
+            ("3-year combo (≥1.5R, sweep close back, absorption, SL≤4%)", COMBO_3Y)]
+    lines = ["<b>3b. SMC + BTC trend gate, year by year</b> (gate = last closed BTC daily ADX(14) ≥ level). "
+             "Cells = trades / R per trade. Pass = gated profit AND better than no gate in every year."]
+    for name, active in sets:
+        tr = [(o, r) for x, o, c, r in raw if smc_pass(x, active)]
+        years = sorted({datetime.fromtimestamp(o / 1000, timezone.utc).year for o, _ in tr})
+
+        def cell(rows):
+            return f"{len(rows)}/{sum(rows) / len(rows):+.2f}" if rows else "0/–"
+
+        def by_year(sel):
+            return {y: [r for o, r in sel if datetime.fromtimestamp(o / 1000, timezone.utc).year == y] for y in years}
+        base = by_year(tr)
+        lines.append(f"\n<b>{name}</b>\nNo gate: " + " | ".join(f"{y} {cell(base[y])}" for y in years))
+        for lvl in (20, 25, 30):
+            g = by_year([(o, r) for o, r in tr if adx_at(o) >= lvl])
+            rg = by_year([(o, r) for o, r in tr if adx_at(o) < lvl])
+            ok = all(g[y] and sum(g[y]) / len(g[y]) > 0 and (not base[y] or sum(g[y]) / len(g[y]) > sum(base[y]) / len(base[y]))
+                     for y in years)
+            lines.append(f"ADX≥{lvl}: " + " | ".join(f"{y} {cell(g[y])}" for y in years)
+                         + f" {'✅' if ok else '❌'}\n  (ADX<{lvl}: " + " | ".join(f"{y} {cell(rg[y])}" for y in years) + ")")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- report
 def fmt(name, st, extra=""):
     if st is None:
@@ -382,6 +440,10 @@ def main():
         k = bisect.bisect_right(bdt, t_ms - DAY) - 1
         return k >= 0 and badx[k] is not None and badx[k] >= lvl
 
+    def adx_at(t_ms):
+        k = bisect.bisect_right(bdt, t_ms - DAY) - 1
+        return badx[k] if k >= 0 and badx[k] is not None else 0.0
+
     # benchmark: BTC buy & hold
     bh = {}
     for i in range(1, len(BD)):
@@ -432,10 +494,12 @@ def main():
                   stats(fill_days(trades_to_daily(tr4, 1 / n), start_ms, end_ms), start_ms), trade_line(tr4)))
 
     # 3. regime switching with the current SMC bot (1% risk per trade)
-    smc = []
+    smc, raw = [], []
     for sym in H1:
         try:
-            smc += smc_trades(H1[sym], H4[sym], sym, start_ms)
+            rs = raw_smc(H1[sym], H4[sym], sym, start_ms)
+            raw += rs
+            smc += [(o, c, r) for x, o, c, r in rs if bot.smc_ok(x)]
         except Exception as e:
             print("smc error", sym, e)
     rng = [(c, r) for o, c, r in smc if not trend_regime(o)]
@@ -463,7 +527,8 @@ def main():
     head = (f"🧪 <b>Trend lab</b> – last {days} days, {n} coins (today's top {bot.TOP_N}, futures data)\n"
             "Costs: 0.05% per side, longs pay 0.01%/8h funding. Survivorship bias: dead coins not included. "
             "Report only – live bot unchanged.")
-    parts = [head, "\n\n".join(rows + s1), "\n\n".join(s2), "\n\n".join(s4), "\n\n".join(s3)]
+    parts = [head, "\n\n".join(rows + s1), "\n\n".join(s2), "\n\n".join(s4), "\n\n".join(s3),
+             regime_by_year(raw, adx_at)]
     msg = ""
     for p in parts:
         if len(msg) + len(p) > 3800:
