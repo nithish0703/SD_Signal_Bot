@@ -1,2 +1,1 @@
-requests
-yfinance
+requests>=2.31
