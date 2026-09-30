@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing), trend_lab = compare 4 trend / regime strategies (uses days + coins), donchian_account = Donchian long-only account test (days, coins, balance)"
+        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing), trend_lab = compare 4 trend / regime strategies (uses days + coins), donchian_account = trend following (TSMOM) test (days, coins), fx_lab = USD/INR strategy backtest"
         type: choice
-        options: [scan, test, backtest, account, amd, smc, smc_futures, account_futures, trend_lab, donchian_account]
+        options: [scan, test, backtest, account, amd, smc, smc_futures, account_futures, trend_lab, donchian_account, fx_lab]
         default: scan
       balance:
         description: "account mode: starting balance ($)"
@@ -146,6 +146,7 @@ jobs:
             if [ "$DAYS" -ge 300 ] 2>/dev/null; then CANDLES=$(( DAYS * 24 )); fi   # long-history validation
             python bot.py --smc --data futures --candles "$CANDLES" --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
           elif [ "$MODE" = "trend_lab" ]; then python trend_lab.py --days "${{ github.event.inputs.days }}" --top-n "${{ github.event.inputs.coins }}"
+          elif [ "$MODE" = "fx_lab" ]; then pip install -q yfinance && python fx_lab.py
           elif [ "$MODE" = "donchian_account" ]; then python trend_lab.py --account --days "${{ github.event.inputs.days }}" --top-n "${{ github.event.inputs.coins }}" --balance "${{ github.event.inputs.balance }}"
           elif [ "$MODE" = "account" ] || [ "$MODE" = "account_futures" ]; then
             DATA=spot; [ "$MODE" = "account_futures" ] && DATA=futures
