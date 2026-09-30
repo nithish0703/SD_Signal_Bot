@@ -2,7 +2,8 @@ name: S&D Signal Bot
 
 on:
   schedule:
-    - cron: "*/5 * * * *"      # every 5 minutes (GitHub may delay a few minutes)
+    - cron: "7 * * * *"        # watchdog only: GitHub cron is often hours late. The live scan runs in a
+                               # ~5.5h loop (every 15 min) that starts its own successor when it ends.
   workflow_dispatch:
     inputs:
       mode:
@@ -46,6 +47,7 @@ on:
 
 permissions:
   contents: write
+  actions: write      # lets the scan loop start the next loop run (workflow_dispatch)
 
 concurrency:
   group: sd-signal-bot-${{ github.ref_name }}   # dev test runs never block the live bot on main
@@ -54,7 +56,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v5
 
@@ -66,6 +68,7 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Run bot
+        timeout-minutes: 350
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -147,7 +150,37 @@ jobs:
               --sizing "${{ github.event.inputs.sizing }}" --risk "${{ github.event.inputs.risk }}" \
               --strategy "${{ github.event.inputs.strategy }}" --top-n "${{ github.event.inputs.coins }}" \
               --entry "${{ github.event.inputs.entry }}"
-          else python bot.py
+          else
+            # Live scan loop: scan now, then at :01 :16 :31 :46 UTC (just after each candle close).
+            # main = 330 min then hand over to a new run; other branches = 35 min test, nothing saved.
+            BRANCH="${{ github.ref_name }}"
+            if [ "$BRANCH" = "main" ]; then LOOP_MIN=330; else LOOP_MIN=35; fi
+            END=$(( $(date +%s) + LOOP_MIN * 60 ))
+            git config user.name "sd-signal-bot"
+            git config user.email "sd-signal-bot@users.noreply.github.com"
+            FIRST=1
+            while true; do
+              if [ $FIRST -eq 0 ]; then
+                NOW=$(date +%s); M=$(( (NOW / 60) % 60 ))
+                for T in 1 16 31 46 61; do if [ $T -gt $M ]; then NEXT=$T; break; fi; done
+                WAIT=$(( (NEXT - M) * 60 - NOW % 60 ))
+                if [ $(( NOW + WAIT )) -ge $END ]; then break; fi
+                sleep $WAIT
+              fi
+              FIRST=0
+              [ "$BRANCH" = "main" ] && { git pull --rebase --autostash -q || true; }
+              echo "===== scan $(date -u '+%F %T') UTC ====="
+              timeout 12m python bot.py || echo "scan failed, continuing"
+              if [ "$BRANCH" = "main" ]; then
+                git add state.json
+                [ -f coin_universe.json ] && git add coin_universe.json
+                if ! git diff --cached --quiet; then
+                  git commit -qm "bot: update state"
+                  git pull --rebase --autostash -q || true
+                  git push -q || true
+                fi
+              fi
+            done
           fi
 
       - name: Save state (stops duplicate signals)
@@ -163,3 +196,9 @@ jobs:
             git pull --rebase --autostash || true
             git push || true
           fi
+
+      - name: Start next scan loop (keeps the bot running 24/7)
+        if: (success() || failure()) && github.ref_name == 'main' && (github.event.inputs.mode == '' || github.event.inputs.mode == 'scan')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bot.yml --ref main -f mode=scan || echo "could not start next run (hourly watchdog cron will)"
