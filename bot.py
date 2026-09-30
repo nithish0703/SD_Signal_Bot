@@ -1503,6 +1503,8 @@ EXITS = [
     ("Trail 2 ATR", "trail", 2.0), ("Trail 3 ATR", "trail", 3.0),
 ]
 MAKER_FEE_PCT = 0.04
+MAKER_ONE_PCT = 0.02        # Binance USDT-M VIP0 maker (limit order), one side
+TAKER_ONE_PCT = 0.05        # Binance USDT-M VIP0 taker (market / stop order), one side
 
 
 def run_exit(C, s, side, kind, v):
@@ -2714,8 +2716,16 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     """Simulate a real account, one position per coin, a trade only opens if free balance >= its margin.
     mode 'risk' : every trade loses ~`risk` $ at SL (leverage picked per trade, like the live signal).
     mode 'fixed': every trade is margin x leverage, so the $ loss depends on the SL distance.
-    Fees included; funding/slippage not."""
+    mode 'compound': like 'risk', but `risk` is a % of the current balance (margin scales too),
+                     so trade size grows / shrinks with the account.
+    Fees included; funding/slippage not. An extra row shows the live exit with realistic Binance fees:
+    limit entry + limit TP = maker 0.02%, stop loss = taker 0.05%."""
     global RISK_USD
+    compound = mode == "compound"
+    risk_pct = risk
+    if compound:
+        risk = balance * risk_pct / 100                          # starting $ risk; grows with the balance
+        mode = "risk"
     RISK_USD = risk
     strategy = strategy or ("smc" if STRATEGY == "both" else STRATEGY)
     if strategy == "smc":
@@ -2777,16 +2787,28 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     _rank = {sym: i for i, sym in enumerate(SYMBOLS)}
     cands.sort(key=lambda c: (c["t"], _rank.get(c["sym"], 999)))   # same candle: bigger coins first
 
-    def pnl(c, px):
+    def fee_pct(c, px, maker):
+        """Round-trip fee in %. maker=False: market fees both ways (FEE_PCT).
+        maker=True: limit entry (maker) + limit TP (maker) or stop-market SL (taker)."""
+        if not maker:
+            return FEE_PCT
+        if px is None:
+            return MAKER_ONE_PCT + TAKER_ONE_PCT
+        move = (px - c["entry"]) if c["side"] == "LONG" else (c["entry"] - px)
+        return MAKER_ONE_PCT + (MAKER_ONE_PCT if move > 0 else TAKER_ONE_PCT)
+
+    def pnl(c, px, maker=False, is_open=False):
         if c["liq"] and (px <= c["liq_px"] if c["side"] == "LONG" else px >= c["liq_px"]):
             return -margin                                        # liquidation takes the whole margin
         move = (px - c["entry"]) / c["entry"] if c["side"] == "LONG" else (c["entry"] - px) / c["entry"]
-        return max(-margin, c["pos"] * move) - c["pos"] * FEE_PCT / 100
+        return max(-margin, c["pos"] * move) - c["pos"] * fee_pct(c, None if is_open else px, maker) / 100
 
+    variants = [(lbl, lbl, False) for lbl, _, _ in exits]
+    variants.insert(1, (f"{exits[0][0]} · maker fees", exits[0][0], True))   # same trades, realistic fees
     results, trade_log = [], []
-    for lbl, _, _ in exits:
+    for lbl, res_key, maker in variants:
         log_this = lbl == exits[0][0]                              # the live exit: keep a per-trade log
-        free, open_ = balance, {}                                  # open_: sym -> (close_t, margin+pnl)
+        free, open_ = balance, {}                                  # open_: sym -> (close_t, margin+pnl, side, margin)
         taken = skipped_cash = skipped_coin = wins = liqs = 0
         pnls, fees = [], 0.0
         peak = low_eq = balance
@@ -2795,11 +2817,11 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
 
         def settle(until):
             nonlocal free, peak, max_dd
-            for sym_, (ct, back, _sd) in sorted(open_.items(), key=lambda kv: kv[1][0] or 1e20):
+            for sym_, (ct, back, _sd, _m) in sorted(open_.items(), key=lambda kv: kv[1][0] or 1e20):
                 if ct is not None and ct <= until:
                     free += back
                     del open_[sym_]
-                    eq = free + margin * len(open_)
+                    eq = free + sum(v[3] for v in open_.values())
                     peak = max(peak, eq)
                     max_dd = max(max_dd, peak - eq)
 
@@ -2811,7 +2833,9 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
             if c["sym"] in open_:
                 skipped_coin += 1
                 continue
-            if free < margin:
+            k = ((free + sum(v[3] for v in open_.values())) / balance) if compound else 1.0
+            m_i = margin * k                                       # compounding: margin and $ risk scale with equity
+            if free < m_i or k <= 0:
                 skipped_cash += 1
                 continue
             if strategy == "smc":
@@ -2833,26 +2857,26 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                     skipped_rule += 1
                     continue
                 bar_count[c["t"]] = bar_count.get(c["t"], 0) + 1
-            px, ct = c["res"][lbl]
-            free -= margin
+            px, ct = c["res"][res_key]
+            free -= m_i
             taken += 1
             if px is None:                                         # still open: mark to market
-                p = pnl(c, last_close[c["sym"]])
-                open_[c["sym"]] = (None, margin + p, c["side"])
+                p = pnl(c, last_close[c["sym"]], maker, True) * k
+                open_[c["sym"]] = (None, m_i + p, c["side"], m_i)
                 pnls.append(("open", p))
             else:
-                p = pnl(c, px)
-                open_[c["sym"]] = (ct, margin + p, c["side"])
+                p = pnl(c, px, maker) * k
+                open_[c["sym"]] = (ct, m_i + p, c["side"], m_i)
                 pnls.append(("closed", p))
                 wins += p > 0
                 if p < 0:
                     loss_ev.append((ct, c["sym"], c["side"]))
-                liqs += c["liq"] and p <= -margin * 0.99
+                liqs += c["liq"] and p <= -m_i * 0.99
             if log_this:
                 tol = abs(c["entry"]) * 1e-6
                 if px is None:
                     why = "open"
-                elif c["liq"] and p <= -margin * 0.99:
+                elif c["liq"] and p <= -m_i * 0.99:
                     why = "LIQ"
                 elif c.get("tp") is not None and abs(px - c["tp"]) <= tol:
                     why = "TP"
@@ -2865,11 +2889,11 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 trade_log.append({"sym": c["sym"], "side": c["side"], "open": c["t"], "close": ct,
                                   "entry": c["entry"], "exit": px if px is not None else last_close[c["sym"]],
                                   "lev": c["lev"], "pnl": p, "why": why})
-            fees += c["pos"] * FEE_PCT / 100
+            fees += c["pos"] * k * fee_pct(c, px, maker) / 100
             max_open = max(max_open, len(open_))
         settle(1e20)
-        unreal = sum(back - margin for ct, back, _sd in open_.values())
-        final = free + margin * len(open_) + unreal
+        unreal = sum(back - m for ct, back, _sd, m in open_.values())
+        final = free + sum(v[3] for v in open_.values()) + unreal
         closed = [p for k, p in pnls if k == "closed"]
         streak = worst = 0
         for p in closed:
@@ -2882,7 +2906,9 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                         "worst": min(closed, default=0), "streak": worst, "liqs": liqs})
 
     levs = [c["lev"] for c in cands] or [leverage]
-    how = (f"${margin:g} margin, ~${risk:g} loss at SL, leverage {min(levs)}–{max(levs)}x (per trade)"
+    how = (f"{risk_pct:g}% of balance risked per trade (compounding; starts at ${margin:g} margin / ~${risk:g} loss), "
+           f"leverage {min(levs)}–{max(levs)}x" if compound else
+           f"${margin:g} margin, ~${risk:g} loss at SL, leverage {min(levs)}–{max(levs)}x (per trade)"
            if mode == "risk" else f"${margin:g} × {leverage}x per trade (position ${pos:g})")
     strat_txt = (f"SMC ({entry_name()}"
                  f"{', discount' if SMC_REQUIRE_DISCOUNT else ''}{', 4h trend' if SMC_REQUIRE_TREND else ''}"
@@ -2937,8 +2963,9 @@ def main():
     ap.add_argument("--margin", type=float, default=5)
     ap.add_argument("--leverage", type=int, default=10)
     ap.add_argument("--days", type=int, default=30)
-    ap.add_argument("--sizing", choices=["risk", "fixed"], default="risk",
-                    help="risk = same $ loss per trade (default), fixed = margin x leverage")
+    ap.add_argument("--sizing", choices=["risk", "fixed", "compound"], default="risk",
+                    help="risk = same $ loss per trade (default), fixed = margin x leverage, "
+                         "compound = --risk is a %% of the current balance")
     ap.add_argument("--risk", type=float, default=1.0, help="$ loss at SL in risk sizing")
     ap.add_argument("--strategy", choices=["smc", "sd", ""], default="", help="account mode strategy")
     ap.add_argument("--top-n", type=int, default=0, help="account/backtest: number of top futures coins")

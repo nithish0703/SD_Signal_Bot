@@ -24,12 +24,12 @@ on:
         description: "account mode: last N days"
         default: "30"
       sizing:
-        description: "account mode: risk = same $ loss every trade (like live signals), fixed = margin x leverage"
+        description: "account mode: risk = same $ loss every trade (like live signals), fixed = margin x leverage, compound = 'risk' is a % of the current balance"
         type: choice
-        options: [risk, fixed]
+        options: [risk, fixed, compound]
         default: risk
       risk:
-        description: "account mode (risk sizing): $ loss if SL is hit"
+        description: "account mode: $ loss if SL is hit (risk sizing) or % of balance (compound sizing)"
         default: "1"
       coins:
         description: "account / smc mode: number of top futures coins (live scan is not affected)"
