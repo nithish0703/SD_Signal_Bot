@@ -21,7 +21,7 @@ on:
         description: "account mode: leverage (x)"
         default: "10"
       days:
-        description: "account mode: last N days"
+        description: "account mode: last N days (smc_futures: 300+ = validate on that many days instead of ~250)"
         default: "30"
       sizing:
         description: "account mode: risk = same $ loss every trade (like live signals), fixed = margin x leverage, compound = 'risk' is a % of the current balance"
@@ -35,9 +35,9 @@ on:
         description: "account / smc mode: number of top futures coins (live scan is not affected)"
         default: "50"
       strategy:
-        description: "account mode: strategy to simulate (smc_scale = smc + ICT scale-in entry comparison)"
+        description: "account mode: strategy to simulate"
         type: choice
-        options: [smc, smc_scale, sd]
+        options: [smc, sd]
         default: smc
       entry:
         description: "smc / account mode: entry model (default = what smc_filters.json says, mid = FVG 50%, top = FVG edge, ote = ICT OTE 70.5%, ob = ICT order block)"
@@ -141,7 +141,10 @@ jobs:
           elif [ "$MODE" = "backtest" ]; then python bot.py --backtest --candles 6000
           elif [ "$MODE" = "amd" ]; then python bot.py --amd --candles 6000
           elif [ "$MODE" = "smc" ]; then python bot.py --smc --candles 6000 --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
-          elif [ "$MODE" = "smc_futures" ]; then python bot.py --smc --data futures --candles 6000 --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
+          elif [ "$MODE" = "smc_futures" ]; then
+            DAYS="${{ github.event.inputs.days }}"; CANDLES=6000
+            if [ "$DAYS" -ge 300 ] 2>/dev/null; then CANDLES=$(( DAYS * 24 )); fi   # long-history validation
+            python bot.py --smc --data futures --candles "$CANDLES" --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
           elif [ "$MODE" = "account" ] || [ "$MODE" = "account_futures" ]; then
             DATA=spot; [ "$MODE" = "account_futures" ] && DATA=futures
             python bot.py --account --data "$DATA" \
