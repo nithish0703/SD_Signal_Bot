@@ -181,12 +181,13 @@ def fetch_klines(symbol, interval, limit, end_time=None, source=None):
 
 
 DATA_SOURCE = "spot"        # backtests only: "futures" = Binance USDT-M futures candles from data.binance.vision
-FUT_KLINE_URL = "https://data.binance.vision/data/futures/um/{period}/klines/{s}/1h/{s}-1h-{d}.zip"
+FUT_KLINE_URL = "https://data.binance.vision/data/futures/um/{period}/klines/{s}/{tf}/{s}-{tf}-{d}.zip"
+FUT_SUB_HOUR = {"5m": 300000, "15m": 900000, "30m": 1800000}   # fetched directly (not aggregated)
 _FUT_CACHE = {}
 TF_HOURS = {"1h": 1, "2h": 2, "4h": 4, "6h": 6, "12h": 12, "1d": 24}
 
 
-def _fut_rows(url):
+def _fut_rows(url, ms=3600000):
     try:
         rows = _zip_rows(url)
     except Exception:
@@ -198,15 +199,16 @@ def _fut_rows(url):
         t = int(r[0])
         t = t // 1000 if t > 10 ** 14 else t          # microseconds -> ms
         out.append({"t": t, "o": float(r[1]), "h": float(r[2]), "l": float(r[3]), "c": float(r[4]),
-                    "v": float(r[5]), "ct": t + 3600000 - 1, "tb": float(r[9]) if len(r) > 9 else None})
+                    "v": float(r[5]), "ct": t + ms - 1, "tb": float(r[9]) if len(r) > 9 else None})
     return out
 
 
-def fetch_futures_1h(fut, hours):
-    """1h USDT-M futures candles for the last `hours` hours (monthly files + daily files for this month).
+def fetch_futures_1h(fut, hours, tf="1h"):
+    """1h (or `tf`) USDT-M futures candles for the last `hours` hours (monthly files + daily files for this month).
     The newest ~1 day is missing (files are published with a delay)."""
     from concurrent.futures import ThreadPoolExecutor
-    have = _FUT_CACHE.get(fut)
+    ms = FUT_SUB_HOUR.get(tf, 3600000)
+    have = _FUT_CACHE.get((fut, tf))
     now = datetime.now(timezone.utc)
     start = now - timedelta(hours=hours + 48)
     if have and have[0]["t"] <= start.timestamp() * 1000:
@@ -214,19 +216,19 @@ def fetch_futures_1h(fut, hours):
     urls, m = [], datetime(start.year, start.month, 1, tzinfo=timezone.utc)
     this_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     while m < this_month:
-        urls.append(FUT_KLINE_URL.format(period="monthly", s=fut, d=m.strftime("%Y-%m")))
+        urls.append(FUT_KLINE_URL.format(period="monthly", s=fut, tf=tf, d=m.strftime("%Y-%m")))
         m = datetime(m.year + (m.month == 12), m.month % 12 + 1, 1, tzinfo=timezone.utc)
     d = max(this_month, start).date()
     while d < now.date():
-        urls.append(FUT_KLINE_URL.format(period="daily", s=fut, d=d.isoformat()))
+        urls.append(FUT_KLINE_URL.format(period="daily", s=fut, tf=tf, d=d.isoformat()))
         d += timedelta(days=1)
     with ThreadPoolExecutor(8) as ex:
-        parts = list(ex.map(_fut_rows, urls))
+        parts = list(ex.map(lambda u: _fut_rows(u, ms), urls))
     rows = {x["t"]: x for part in parts for x in part}
     out = [rows[t] for t in sorted(rows)]
     if not out:
         raise RuntimeError(f"{fut}: no futures files on data.binance.vision")
-    _FUT_CACHE[fut] = out
+    _FUT_CACHE[(fut, tf)] = out
     return out
 
 
@@ -251,6 +253,10 @@ def _aggregate(c1, hours):
 
 
 def fetch_history(symbol, interval, total, source=None):
+    if DATA_SOURCE == "futures" and interval in FUT_SUB_HOUR:     # 15m etc: direct futures files
+        per_h = 3600000 // FUT_SUB_HOUR[interval]
+        c = fetch_futures_1h(FUTURES_NAME.get(symbol, symbol), total // per_h + 1, interval)
+        return c[-total:], "futures-vision"
     if DATA_SOURCE == "futures" and interval in TF_HOURS:
         hrs = TF_HOURS[interval]
         c1 = fetch_futures_1h(FUTURES_NAME.get(symbol, symbol), total * hrs)
@@ -1340,7 +1346,7 @@ def futures_basis(sym, C):
     day = None
     for lag in (1, 2, 3):
         d = (today - timedelta(days=lag)).isoformat()
-        got = _fut_rows(FUT_KLINE_URL.format(period="daily", s=fut, d=d))
+        got = _fut_rows(FUT_KLINE_URL.format(period="daily", s=fut, tf="1h", d=d))
         got = [f for f in got if f["t"] in spot]
         if got:
             rows += got
@@ -2944,12 +2950,17 @@ def main():
     ap.add_argument("--top-n", type=int, default=0, help="account/backtest: number of top futures coins")
     ap.add_argument("--entry", choices=["default", "mid", "top", "ote", "ob", ""], default="",
                     help="smc/account: entry model to test (mid = FVG 50%%, top = FVG edge, ote = ICT OTE, ob = order block)")
+    ap.add_argument("--tf", choices=["", "15m", "1h"], default="",
+                    help="smc/account backtests only: entry timeframe (15m uses 1h as the higher timeframe)")
     ap.add_argument("--data", choices=["spot", "futures"], default="spot",
                     help="smc/account backtests: candle source (futures = USDT-M futures files from data.binance.vision)")
     args = ap.parse_args()
     if args.data == "futures" and (args.account or args.smc):
         global DATA_SOURCE
         DATA_SOURCE = "futures"
+    if args.tf and (args.account or args.smc):
+        global TIMEFRAME, HTF
+        TIMEFRAME, HTF = args.tf, {"15m": "1h", "1h": "4h"}[args.tf]   # live scan keeps its own timeframe
     if args.entry not in ("", "default") and (args.account or args.smc):
         global SMC_ENTRY
         SMC_ENTRY = args.entry
