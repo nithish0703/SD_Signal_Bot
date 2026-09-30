@@ -1948,6 +1948,7 @@ def _smc_long(C, H, entry_mode, pending=False):
         q["sweep_rej"] = rec == s                                        # sweep candle itself closed back above
         q["mss_vol"] = (vol[m] / (sum(vol[m - 20:m]) / 20)) if m >= 20 and sum(vol[m - 20:m]) > 0 else 0.0
         q["mss_bars"] = m - s                                            # candles from sweep to MSS
+        q["reclaim_bars"] = rec - s                                      # 0 = the sweep candle itself closed back in
         sg = max(m, fv + 1)                                              # signal candle (setup known)
         q["adx_sig"] = ADX[sg] or 0.0
         q["chop_sig"] = CH[sg] if CH[sg] is not None else 100.0
@@ -2106,6 +2107,7 @@ SMC_QUALITY = [
     ("ICT: entry below NY midnight open (long) / above (short)", "SMC_MIDNIGHT", 1, lambda t, v: t.get("below_mo", True)),
     ("ICT: FVG inside the OTE zone (62–79%)", "SMC_OTE_FVG", 1, lambda t, v: t.get("ote_fvg", True)),
     ("ICT: order block present before MSS", "SMC_HAS_OB", 1, lambda t, v: t.get("has_ob", True)),
+    ("Diag: liquidity TP required (no 2R fallback)", "SMC_LIQ_TP", 1, lambda t, v: t.get("liq") is not None),
     ("Liquidity: no weekend signals", "SMC_NO_WEEKEND", 1, lambda t, v: not t.get("weekend", False)),
     ("Volatility: ATR% normal (20–80th pct of 30d)", "SMC_VOL_BAND", 1, lambda t, v: 20 <= t.get("atr_pct", 50) <= 80),
     ("Risk: SL ≤4% (stop not too wide)", "SMC_MAX_SL", 4, lambda t, v: sl_pct(t) <= v),
@@ -2250,12 +2252,31 @@ def _smc_liq_be(C, s, be_r=1.0):
     return None
 
 
+def _smc_liq_partial(C, s):
+    """Scale-out: close 50% at +1R (SL stays), the rest at the liquidity TP (else 2R). Gross R."""
+    side, risk = s["side"], abs(s["entry"] - s["sl"])
+    tp_dist = abs(s["liq"] - s["entry"]) if s["liq"] is not None else 2.0 * risk
+    E, S = _px(s["entry"], side), _px(s["sl"], side)
+    TP, one = E + tp_dist, E + risk
+    half = False
+    for x in C[s["e"] + 1:]:
+        hi, lo = (x["h"], x["l"]) if side == "LONG" else (-x["l"], -x["h"])
+        if lo <= S:
+            return -1.0 if not half else 0.5 - 0.5
+        if not half and hi >= one:
+            half = True
+        if hi >= TP:
+            return (0.5 + 0.5 * tp_dist / risk) if tp_dist > risk else tp_dist / risk
+    return None
+
+
 SMC_EXITS = [
     ("Fixed 1.5R", _smc(lambda C, s: simulate(C, s, s["side"], 1.5))),
     ("Fixed 2R", _smc(lambda C, s: simulate(C, s, s["side"], 2.0))),
     ("Fixed 3R", _smc(lambda C, s: simulate(C, s, s["side"], 3.0))),
     ("Prev high/low (liquidity)", _smc(_smc_liq)),
     ("Liquidity + breakeven at 1R", _smc(lambda C, s: _smc_liq_be(C, s, 1.0))),
+    ("Liquidity, 50% off at 1R", _smc(_smc_liq_partial)),
     ("Trail 3 ATR", _smc(lambda C, s: _simulate_trail(C, s, s["side"], 3.0))),
 ]
 SMC_TESTS = [
@@ -2343,6 +2364,9 @@ def validate_quality(trades):
     be_on = bev[0] >= 60 and bev[2] >= 20 and bev[1] >= cur[1] + 0.01 and bev[3] > cur[3] and bev[3] > 0
     be_line = (f"Breakeven at 1R: train {bev[1]:+.2f}R, test {bev[3]:+.2f}R vs without "
                f"{cur[1]:+.2f}R / {cur[3]:+.2f}R → {'✅ applied' if be_on else '❌ not applied'}")
+    pv = ev(apply(combo), "Liquidity, 50% off at 1R")
+    be_line += (f"\n50% off at 1R (info): train {pv[1]:+.2f}R, test {pv[3]:+.2f}R"
+                f"{' ⬆️ better in both' if pv[1] > cur[1] and pv[3] > cur[3] else ''}")
     result = {"filters": combo, "entry": SMC_ENTRY, "be": 1.0 if be_on else 0.0, "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
               "exit": ex, "baseline": {"train": [bn, round(bavg, 3)], "test": [btn, round(btavg, 3)]},
               "with_filters": {"train": [cur[0], round(cur[1], 3)], "test": [cur[2], round(cur[3], 3)]}}
@@ -2377,8 +2401,114 @@ def validate_quality(trades):
     return table, msg
 
 
+def _mae_mfe(C, s, ci):
+    """Max adverse / favourable excursion in R between the fill and the exit candle (liquidity exit)."""
+    if s.get("fill_loss"):
+        return 1.0, 0.0
+    side, E = s["side"], _px(s["entry"], s["side"])
+    risk = abs(s["entry"] - s["sl"])
+    end = ci if ci is not None else len(C) - 1
+    lo, hi = E, E
+    for x in C[s["e"] + 1:end + 1]:
+        h_, l_ = (x["h"], x["l"]) if side == "LONG" else (-x["l"], -x["h"])
+        lo, hi = min(lo, l_), max(hi, h_)
+    return (E - lo) / risk, (hi - E) / risk
+
+
+DIAG_VARS = [
+    ("SL distance %", lambda t: t["slp"], [(0, 0.5), (0.5, 1), (1, 2), (2, 3), (3, 4), (4, 99)]),
+    ("Sweep depth (ATR)", lambda t: t.get("sweep_depth"), [(0, 0.3), (0.3, 0.7), (0.7, 99)]),
+    ("Reclaim speed (candles)", lambda t: t.get("reclaim_bars"), [(0, 1), (1, 2), (2, 3)]),
+    ("Sweep → MSS (candles)", lambda t: t.get("mss_bars"), [(0, 3), (3, 5), (5, 99)]),
+    ("MSS body (ATR)", lambda t: t.get("disp"), [(0, 0.5), (0.5, 1), (1, 99)]),
+    ("MSS close past level (ATR)", lambda t: t.get("mss_margin"), [(0, 0.1), (0.1, 0.3), (0.3, 99)]),
+    ("FVG size (ATR)", lambda t: t.get("fvg_atr"), [(0, 0.2), (0.2, 0.4), (0.4, 99)]),
+    ("FVG age at fill (candles)", lambda t: t.get("fill_wait"), [(0, 3), (3, 9), (9, 99)]),
+    ("TP distance (R)", lambda t: t["tgt_r"], [(0, 2), (2, 3), (3, 5), (5, 999)]),
+    ("TP type", lambda t: "liquidity" if t.get("liq") is not None else "2R fallback", None),
+    ("Side", lambda t: t["side"], None),
+    ("BTC 4h trend agrees", lambda t: "yes" if t.get("btc_ok") else "no", None),
+    ("Coin 4h trend agrees", lambda t: "yes" if t.get("trend") else "no", None),
+    ("Volatility pct (30d)", lambda t: t.get("atr_pct"), [(0, 33), (33, 66), (66, 101)]),
+    ("Volume rank", lambda t: t.get("rank"), [(1, 11), (11, 26), (26, 100)]),
+    ("Same-side trades open at entry", lambda t: t.get("same_open"), [(0, 1), (1, 2), (2, 99)]),
+    ("Quality score (report only)", lambda t: quality_score(t), None),
+    ("Side × BTC 4h trend", lambda t: f"{t['side']} / BTC {'agrees' if t.get('btc_ok') else 'against'}", None),
+    ("Side × coin 4h trend", lambda t: f"{t['side']} / coin {'agrees' if t.get('trend') else 'against'}", None),
+    ("Side × TP distance", lambda t: f"{t['side']} / {'<3R' if t['tgt_r'] < 3 else '≥3R'}", None),
+    ("Side × volume rank", lambda t: f"{t['side']} / {'top 25' if t.get('rank', 99) <= 25 else 'rank 26+'}", None),
+]
+
+
+def quality_score(t):
+    """0–5 points: BTC 4h agrees, normal volatility, top-25 volume, SL 1.5–4%, liquidity target. Report only."""
+    return (int(bool(t.get("btc_ok"))) + int(20 <= t.get("atr_pct", 50) <= 80) + int(t.get("rank", 99) <= 25)
+            + int(1.5 <= t["slp"] <= 4) + int(t.get("liq") is not None))
+
+
+def diagnostics(trades, low_sl, combo):
+    """Loss attribution for the live setup (no filters changed): per-variable buckets with
+    trades, win %, net R per trade (train and last-60-days test), average MAE / MFE."""
+    ex = "Prev high/low (liquidity)"
+    cut = time.time() * 1000 - 60 * 86400000
+    base_ok = lambda t: (not SMC_REQUIRE_DISCOUNT or t["discount"]) and (not SMC_REQUIRE_TREND or t["trend"]) \
+        and passes_filters(t)
+    live = [t for t in trades if base_ok(t) and smc_quality_ok(t, combo) and t["res"].get(ex) is not None]
+    no_sl_cap = {k: v for k, v in combo.items() if k != "SMC_MAX_SL"}
+    sl_set = [t for t in trades + low_sl if base_ok(t) and smc_quality_ok(t, no_sl_cap) and t["res"].get(ex) is not None]
+    for t in live:                                         # portfolio exposure at entry
+        t["same_open"] = sum(1 for o in live if o is not t and o["side"] == t["side"]
+                             and o["time"] <= t["time"] < (o.get("close_ct") or 1e20))
+    net = lambda t: t["res"][ex] - FEE_PCT / t["slp"]
+
+    def row(sel):
+        if not sel:
+            return None
+        w = sum(1 for t in sel if net(t) > 0)
+        te = [t for t in sel if t["time"] >= cut]
+        return (len(sel), w / len(sel) * 100, sum(net(t) for t in sel) / len(sel),
+                len(te), (sum(net(t) for t in te) / len(te)) if te else 0.0,
+                sum(t["mae"] for t in sel) / len(sel), sum(t["mfe"] for t in sel) / len(sel))
+
+    lines, weak = [], []
+    allr = row(live)
+    losers = [t for t in live if net(t) <= 0]
+    went_1r = sum(1 for t in losers if t["mfe"] >= 1) / len(losers) * 100 if losers else 0
+    for name, fn, buckets in DIAG_VARS:
+        pool = sl_set if name.startswith("SL distance") else live
+        vals = [(fn(t), t) for t in pool if fn(t) is not None]
+        if buckets:
+            whole = any(k in name for k in ("candles", "rank", "Same-side"))
+            lab = lambda a, b: (f"≥{a:g}" if b >= 99 else (f"{a:g}" if whole and b - 1 == a else
+                                (f"{a:g}–{b - 1:g}" if whole else f"{a:g}–{b:g}")))
+            groups = [(lab(a, b), [t for v, t in vals if a <= v < b]) for a, b in buckets]
+        else:
+            keys = sorted({v for v, _ in vals})
+            groups = [(k, [t for v, t in vals if v == k]) for k in keys]
+        lines.append(f"| **{name}** | | | | | | |")
+        for lab, sel in groups:
+            r = row(sel)
+            if not r:
+                continue
+            lines.append(f"| {lab} | {r[0]} | {r[1]:.0f}% | {r[2]:+.2f}R | {r[3]} / {r[4]:+.2f}R | {r[5]:.2f}R | {r[6]:.2f}R |")
+            if r[0] >= 10 and r[2] < 0 and not (name.startswith("SL distance") and lab.startswith(("0", "≥4"))):
+                weak.append(f"{name} {lab}: {r[0]} trades, {r[2]:+.2f}R")
+    table = ("### Loss diagnostics (live setup, nothing changed)\n\n"
+             f"Live trades: {allr[0] if allr else 0}, win {allr[1] if allr else 0:.0f}%, "
+             f"{allr[2] if allr else 0:+.2f}R per trade. Losers that were ≥1R in profit before the SL: {went_1r:.0f}%.\n"
+             "SL-distance rows ignore the SL caps so every bucket shows. Test = last 60 days. MAE/MFE = worst / best move "
+             "before the exit, in R.\n\n| Bucket | Trades | Win% | Net R/trade | Test trades / R | Avg MAE | Avg MFE |\n"
+             "|---|---|---|---|---|---|---|\n" + "\n".join(lines) + "\n")
+    msg = (f"\n🔬 <b>Loss diagnostics</b> (info only, live logic unchanged)\n"
+           f"Losers ≥1R in profit before SL: {went_1r:.0f}%\n"
+           + ("Weak buckets (≥10 trades, negative): " + "; ".join(weak[:6]) if weak
+              else "No bucket with ≥10 trades is negative – losses are spread evenly"))
+    return table, msg
+
+
 def run_smc_backtest(total):
     groups = {"top": [], "mid": [], "ote": [], "ob": []}
+    low_sl = []                                               # setups below MIN_SL_PCT (diagnostics only)
     coins = 0
     try:
         HB, _ = fetch_history("BTCUSDT", HTF, max(total // 4 + EMA_LEN + 50, 300))
@@ -2394,15 +2524,18 @@ def run_smc_backtest(total):
             print("ERROR", e)
             continue
         coins += 1
+        rank = SYMBOLS.index(sym) + 1 if sym in SYMBOLS else 99
         for mode in groups:
             for st in tag_btc(find_smc_setups(C, H, mode), sym, btc_fn):
-                if sl_pct(st) < MIN_SL_PCT:
+                low = sl_pct(st) < MIN_SL_PCT
+                if low and mode != SMC_ENTRY:
                     continue
-                st["slp"], st["sym"] = sl_pct(st), sym
+                st["slp"], st["sym"], st["rank"] = sl_pct(st), sym, rank
                 st["res"] = {lbl: f(C, st) for lbl, f in SMC_EXITS}
                 _, ci = _exit_detail(C, st, st["side"], "price", None, st["sl"])
                 st["close_ct"] = C[ci]["ct"] if ci is not None else None
-                groups[mode].append(st)
+                st["mae"], st["mfe"] = _mae_mfe(C, st, ci)
+                (low_sl if low else groups[mode]).append(st)
         print(f"{sym}: " + ", ".join(f"{g} {sum(1 for t in groups[g] if t['sym'] == sym)}" for g in groups) + " setups")
         time.sleep(0.1)
 
@@ -2440,6 +2573,15 @@ def run_smc_backtest(total):
         with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
             f.write(report)
     qtable, qmsg = validate_quality(groups.get(SMC_ENTRY, groups["mid"]))
+    try:
+        with open(SMC_FILTERS_FILE) as f:
+            combo = {k: float(v) for k, v in json.load(f).get("filters", {}).items()}
+        dtable, dmsg = diagnostics(groups.get(SMC_ENTRY, groups["mid"]), low_sl, combo)
+    except Exception as e:
+        print("diagnostics error", e)
+        dtable, dmsg = "", ""
+    qtable += "\n" + dtable
+    qmsg += dmsg
     print(qtable)
     if os.getenv("GITHUB_STEP_SUMMARY"):
         with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
