@@ -1848,9 +1848,10 @@ TF_MS = {"5m": 300000, "15m": 900000, "30m": 1800000, "1h": 3600000, "2h": 72000
          "4h": 14400000, "1d": 86400000}
 
 
-def _smc_long(C, H, entry_mode, pending=False):
+def _smc_long(C, H, entry_mode, pending=False, unfilled=False):
     """Bullish SMC setups in C (use flip() for bearish).
-    pending=True also returns setups whose limit order is still waiting at the last candle."""
+    pending=True also returns setups whose limit order is still waiting at the last candle.
+    unfilled=True also returns setups whose order was cancelled / expired unfilled (diagnostics only)."""
     n = len(C)
     h = [x["h"] for x in C]; l = [x["l"] for x in C]; cl = [x["c"] for x in C]
     A = atr(h, l, cl, ATR_LEN)
@@ -1873,7 +1874,7 @@ def _smc_long(C, H, entry_mode, pending=False):
         dd = x["t"] // 86400000
         dlow[dd] = min(dlow.get(dd, x["l"]), x["l"])
     t_idx = {x["t"]: i for i, x in enumerate(C)}
-    out, used = [], set()
+    out, used, unf_seen = [], set(), set()
     for p, L in lows:
         # 1. sweep: first candle that trades below the swing low
         s = next((k for k in range(p + PIVOT_LEN + 1, min(n, p + SMC_SWEEP_MAX)) if l[k] < L), None)
@@ -1999,6 +2000,19 @@ def _smc_long(C, H, entry_mode, pending=False):
                     "adx": ADX[sig] or 0.0, "chop": CH[sig] if CH[sig] is not None else 100.0,
                     "discount": entry <= (sweep_low + leg_high) / 2, "fill_wait": None, **q,
                 })
+            elif unfilled and s not in unf_seen and not (not cancelled and start + SMC_FILL_MAX > n):
+                unf_seen.add(s)                           # order never filled (cancelled / expired)
+                kk = bisect.bisect_right(hct, C[sig]["ct"]) - 1
+                out.append({
+                    "unfilled": True, "pending": False, "start": start, "sig": sig, "entry": entry, "sl": sl,
+                    "atr": A[sig] or a, "time": C[sig]["ct"], "sweep_t": C[s]["t"], "score": 6,
+                    "cancelled": cancelled,
+                    "liq": prev_high if prev_high > entry + 0.5 * risk else None,
+                    "trend": kk >= 0 and he[kk] is not None and hc[kk] > he[kk],
+                    "hadx": HADX[kk] if kk >= 0 and HADX[kk] is not None else 0.0,
+                    "adx": ADX[sig] or 0.0, "chop": CH[sig] if CH[sig] is not None else 100.0,
+                    "discount": entry <= (sweep_low + leg_high) / 2, "fill_wait": None, **q,
+                })
             continue
         used.add(s)
         kk = bisect.bisect_right(hct, C[f]["ct"]) - 1
@@ -2015,10 +2029,10 @@ def _smc_long(C, H, entry_mode, pending=False):
     return out
 
 
-def find_smc_setups(C, H, entry_mode="top", pending=False):
-    longs = [dict(x, side="LONG") for x in _smc_long(C, H, entry_mode, pending)]
+def find_smc_setups(C, H, entry_mode="top", pending=False, unfilled=False):
+    longs = [dict(x, side="LONG") for x in _smc_long(C, H, entry_mode, pending, unfilled)]
     shorts = []
-    for x in _smc_long(flip(C), flip(H), entry_mode, pending):
+    for x in _smc_long(flip(C), flip(H), entry_mode, pending, unfilled):
         x = dict(x, side="SHORT", entry=-x["entry"], sl=-x["sl"])
         x["liq"] = -x["liq"] if x["liq"] is not None else None
         if "cancel" in x:
@@ -2712,6 +2726,108 @@ def send_monthly(log, balance, exit_name):
        + f"\n\nProfitable months: <b>{pos}/{len(months)}</b>")
 
 
+def _diag_sl_then_tp(C, s, dg):
+    """Filled SMC trade with the live exit (liquidity TP). If it hit the SL, did price reach the TP later?
+    Also: result of the same trade with a wider SL (same $ risk -> smaller position)."""
+    side = s["side"]
+    E, T = _px(s["entry"], side), _px(s["tp"], side)
+    risk = E - _px(s["sl"], side)
+    if risk <= 0:
+        return
+    dg["filled"] += 1
+    for k in (0.0, 0.25, 0.5, 1.0):                          # SL k x R further away
+        sl_k = _px(_px(s["sl"], side) - k * risk, side)
+        xe = C[s["e"]]
+        fl_k = s.get("fill_loss") if k == 0 else (xe["l"] <= sl_k if side == "LONG" else xe["h"] >= sl_k)
+        px, _ = _exit_detail(C, dict(s, fill_loss=fl_k), side, "price", None, sl_k)
+        if px is not None:
+            dg["wide"][k] += (_px(px, side) - E) / (risk * (1 + k))
+    px, idx = _exit_detail(C, s, side, "price", None, s["sl"])
+    if px is None or _px(px, side) >= E:
+        return                                               # still open or a winner
+    dg["sl"] += 1
+    x0 = C[idx]
+    hi0 = x0["h"] if side == "LONG" else -x0["l"]
+    if hi0 >= T:
+        dg["same_candle"] += 1                               # SL and TP in one candle: counted as a loss
+        return
+    deepest = _px(px, side)
+    for j in range(idx, min(len(C), idx + 73)):
+        x = C[j]
+        hi, lo = (x["h"], x["l"]) if side == "LONG" else (-x["l"], -x["h"])
+        if j > idx and hi >= T:
+            depth = (_px(s["sl"], side) - min(deepest, lo)) / risk      # how far past the SL it went (R)
+            dg["sl_tp_24" if j - idx <= 24 else "sl_tp_72"] += 1
+            dg["depth"].append(max(0.0, depth))
+            return
+        deepest = min(deepest, lo)
+
+
+def _diag_missed(C, s, dg):
+    """Unfilled SMC order: did price reach the TP without ever touching the entry?"""
+    side = s["side"]
+    E, T = _px(s["entry"], side), _px(s["tp"], side)
+    risk = E - _px(s["sl"], side)
+    if risk <= 0:
+        return
+    dg["unfilled"] += 1
+    closest = None
+    for j in range(s["start"], min(len(C), s["start"] + 48)):
+        x = C[j]
+        hi, lo = (x["h"], x["l"]) if side == "LONG" else (-x["l"], -x["h"])
+        if lo <= E:
+            return                                           # entry touched later (after the order was gone)
+        closest = lo if closest is None else min(closest, lo)
+        if hi >= T:
+            gap = (closest - E) / risk
+            dg["miss_24" if j - s["start"] < SMC_FILL_MAX else "miss_48"] += 1
+            dg["gap"].append(gap)
+            return
+
+
+def send_sl_tp_diag(dg, days):
+    """Report: stop hunts (SL then TP) and missed winners (TP without fill)."""
+    f, n_sl, u = dg["filled"], dg["sl"], dg["unfilled"]
+    if not f:
+        return
+    hunts = dg["sl_tp_24"] + dg["sl_tp_72"]
+    d = dg["depth"]
+    dcount = lambda a, b: sum(1 for v in d if a < v <= b)
+    g = dg["gap"]
+    gcount = lambda a, b: sum(1 for v in g if a < v <= b)
+    miss = dg["miss_24"] + dg["miss_48"]
+    base = dg["wide"][0.0]
+    lines = [
+        f"🔍 <b>SL→TP & missed entries</b> (last {days} days, all live-filter setups, liquidity TP)",
+        "",
+        f"<b>1. SL hit, then TP reached</b> ({n_sl} SL trades of {f} filled)",
+        f"• TP within 24 candles after SL: <b>{dg['sl_tp_24']}</b>",
+        f"• TP within 25–72 candles after SL: <b>{dg['sl_tp_72']}</b>",
+        f"• SL + TP in the same candle (counted as loss): {dg['same_candle']}",
+        f"• Never reached TP: {n_sl - hunts - dg['same_candle']}",
+        f"How far past the SL price went first: ≤0.25R {dcount(-1, 0.25)} | 0.25–0.5R {dcount(0.25, 0.5)} | "
+        f"0.5–1R {dcount(0.5, 1)} | >1R {dcount(1, 1e9)}",
+        "Wider SL (same $ risk, smaller position), total R before fees: "
+        + " | ".join(f"{'now' if k == 0 else f'+{k:g}R'} {dg['wide'][k]:+.1f}R" for k in (0.0, 0.25, 0.5, 1.0)),
+        "",
+        f"<b>2. Entry never filled, but TP reached</b> ({u} unfilled orders)",
+        f"• TP reached within {SMC_FILL_MAX} candles of the signal: <b>{dg['miss_24']}</b>",
+        f"• TP reached {SMC_FILL_MAX + 1}–48 candles after the signal: <b>{dg['miss_48']}</b>",
+        f"• Missed winners / all signals: {miss}/{f + u} ({miss / max(1, f + u) * 100:.0f}%)",
+        f"How close price came to the entry (R): ≤0.1R {gcount(-1, 0.1)} | 0.1–0.25R {gcount(0.1, 0.25)} | "
+        f"0.25–0.5R {gcount(0.25, 0.5)} | >0.5R {gcount(0.5, 1e9)}",
+        "",
+        "Report only – nothing changed. Counts every setup that passed the live filters "
+        "(the account above may skip some because a coin already had a trade open).",
+    ]
+    msg = "\n".join(lines)
+    print(msg)
+    if os.getenv("GITHUB_STEP_SUMMARY"):
+        with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as fh:
+            fh.write("\n\n" + re.sub(r"</?b>", "**", msg).replace("\n", "  \n") + "\n")
+    tg(msg)
+
+
 def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy=None):
     """Simulate a real account, one position per coin, a trade only opens if free balance >= its margin.
     mode 'risk' : every trade loses ~`risk` $ at SL (leverage picked per trade, like the live signal).
@@ -2744,6 +2860,8 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     liq_dist = max(0.0, 100 / leverage - MMR_PCT)                 # % move that liquidates
 
     cands, coins, last_close = [], 0, {}
+    dg = {"filled": 0, "sl": 0, "sl_tp_24": 0, "sl_tp_72": 0, "same_candle": 0, "depth": [],
+          "wide": {0.0: 0.0, 0.25: 0.0, 0.5: 0.0, 1.0: 0.0}, "unfilled": 0, "miss_24": 0, "miss_48": 0, "gap": []}
     btc_fn = None
     if strategy == "smc" and any(v in SMC_ACTIVE for v in BTC_VARS):
         try:
@@ -2761,6 +2879,15 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
         last_close[sym] = C[-1]["c"]
         if strategy == "smc":
             pool = [(x["side"], x) for x in tag_btc(find_smc_setups(C, H, SMC_ENTRY), sym, btc_fn) if smc_ok(x)]
+            try:                                                   # diagnostics only (stop hunts, missed winners)
+                for _, x in pool:
+                    if x["time"] >= start_ms:
+                        _diag_sl_then_tp(C, x, dg)
+                for x in tag_btc(find_smc_setups(C, H, SMC_ENTRY, unfilled=True), sym, btc_fn):
+                    if x.get("unfilled") and x["time"] >= start_ms and smc_ok(x):
+                        _diag_missed(C, x, dg)
+            except Exception as e:
+                print("diag error", sym, e)
         else:
             pool = [(side, x) for side in ("LONG", "SHORT") for x in setups_for(C, H, side)
                     if x["score"] >= MIN_SCORE and sl_pct(x) >= MIN_SL_PCT and passes_filters(x)]
@@ -2949,6 +3076,8 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     tg(msg)
     send_monthly(trade_log, balance, exits[0][0])
     send_trade_log(trade_log, balance, exits[0][0], days)
+    if strategy == "smc":
+        send_sl_tp_diag(dg, days)
 
 
 def main():
