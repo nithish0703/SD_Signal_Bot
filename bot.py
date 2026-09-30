@@ -2107,6 +2107,7 @@ SMC_QUALITY = [
     ("ICT: entry below NY midnight open (long) / above (short)", "SMC_MIDNIGHT", 1, lambda t, v: t.get("below_mo", True)),
     ("ICT: FVG inside the OTE zone (62–79%)", "SMC_OTE_FVG", 1, lambda t, v: t.get("ote_fvg", True)),
     ("ICT: order block present before MSS", "SMC_HAS_OB", 1, lambda t, v: t.get("has_ob", True)),
+    ("Diag: liquidity TP required (no 2R fallback)", "SMC_LIQ_TP", 1, lambda t, v: t.get("liq") is not None),
     ("Liquidity: no weekend signals", "SMC_NO_WEEKEND", 1, lambda t, v: not t.get("weekend", False)),
     ("Volatility: ATR% normal (20–80th pct of 30d)", "SMC_VOL_BAND", 1, lambda t, v: 20 <= t.get("atr_pct", 50) <= 80),
     ("Risk: SL ≤4% (stop not too wide)", "SMC_MAX_SL", 4, lambda t, v: sl_pct(t) <= v),
@@ -2251,12 +2252,31 @@ def _smc_liq_be(C, s, be_r=1.0):
     return None
 
 
+def _smc_liq_partial(C, s):
+    """Scale-out: close 50% at +1R (SL stays), the rest at the liquidity TP (else 2R). Gross R."""
+    side, risk = s["side"], abs(s["entry"] - s["sl"])
+    tp_dist = abs(s["liq"] - s["entry"]) if s["liq"] is not None else 2.0 * risk
+    E, S = _px(s["entry"], side), _px(s["sl"], side)
+    TP, one = E + tp_dist, E + risk
+    half = False
+    for x in C[s["e"] + 1:]:
+        hi, lo = (x["h"], x["l"]) if side == "LONG" else (-x["l"], -x["h"])
+        if lo <= S:
+            return -1.0 if not half else 0.5 - 0.5
+        if not half and hi >= one:
+            half = True
+        if hi >= TP:
+            return (0.5 + 0.5 * tp_dist / risk) if tp_dist > risk else tp_dist / risk
+    return None
+
+
 SMC_EXITS = [
     ("Fixed 1.5R", _smc(lambda C, s: simulate(C, s, s["side"], 1.5))),
     ("Fixed 2R", _smc(lambda C, s: simulate(C, s, s["side"], 2.0))),
     ("Fixed 3R", _smc(lambda C, s: simulate(C, s, s["side"], 3.0))),
     ("Prev high/low (liquidity)", _smc(_smc_liq)),
     ("Liquidity + breakeven at 1R", _smc(lambda C, s: _smc_liq_be(C, s, 1.0))),
+    ("Liquidity, 50% off at 1R", _smc(_smc_liq_partial)),
     ("Trail 3 ATR", _smc(lambda C, s: _simulate_trail(C, s, s["side"], 3.0))),
 ]
 SMC_TESTS = [
@@ -2344,6 +2364,9 @@ def validate_quality(trades):
     be_on = bev[0] >= 60 and bev[2] >= 20 and bev[1] >= cur[1] + 0.01 and bev[3] > cur[3] and bev[3] > 0
     be_line = (f"Breakeven at 1R: train {bev[1]:+.2f}R, test {bev[3]:+.2f}R vs without "
                f"{cur[1]:+.2f}R / {cur[3]:+.2f}R → {'✅ applied' if be_on else '❌ not applied'}")
+    pv = ev(apply(combo), "Liquidity, 50% off at 1R")
+    be_line += (f"\n50% off at 1R (info): train {pv[1]:+.2f}R, test {pv[3]:+.2f}R"
+                f"{' ⬆️ better in both' if pv[1] > cur[1] and pv[3] > cur[3] else ''}")
     result = {"filters": combo, "entry": SMC_ENTRY, "be": 1.0 if be_on else 0.0, "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
               "exit": ex, "baseline": {"train": [bn, round(bavg, 3)], "test": [btn, round(btavg, 3)]},
               "with_filters": {"train": [cur[0], round(cur[1], 3)], "test": [cur[2], round(cur[3], 3)]}}
@@ -2409,7 +2432,18 @@ DIAG_VARS = [
     ("Volatility pct (30d)", lambda t: t.get("atr_pct"), [(0, 33), (33, 66), (66, 101)]),
     ("Volume rank", lambda t: t.get("rank"), [(1, 11), (11, 26), (26, 100)]),
     ("Same-side trades open at entry", lambda t: t.get("same_open"), [(0, 1), (1, 2), (2, 99)]),
+    ("Quality score (report only)", lambda t: quality_score(t), None),
+    ("Side × BTC 4h trend", lambda t: f"{t['side']} / BTC {'agrees' if t.get('btc_ok') else 'against'}", None),
+    ("Side × coin 4h trend", lambda t: f"{t['side']} / coin {'agrees' if t.get('trend') else 'against'}", None),
+    ("Side × TP distance", lambda t: f"{t['side']} / {'<3R' if t['tgt_r'] < 3 else '≥3R'}", None),
+    ("Side × volume rank", lambda t: f"{t['side']} / {'top 25' if t.get('rank', 99) <= 25 else 'rank 26+'}", None),
 ]
+
+
+def quality_score(t):
+    """0–5 points: BTC 4h agrees, normal volatility, top-25 volume, SL 1.5–4%, liquidity target. Report only."""
+    return (int(bool(t.get("btc_ok"))) + int(20 <= t.get("atr_pct", 50) <= 80) + int(t.get("rank", 99) <= 25)
+            + int(1.5 <= t["slp"] <= 4) + int(t.get("liq") is not None))
 
 
 def diagnostics(trades, low_sl, combo):
