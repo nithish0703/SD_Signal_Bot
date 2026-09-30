@@ -410,11 +410,37 @@ def donchian_legs(D):
 MIN_NOTIONAL = 5.0          # Binance USDT-M minimum order value for most coins (BTC/ETH need more)
 
 
-def donchian_account(D1, syms, start_ms, end_ms, balance, scale, legs_cache):
+def pit_universe(D1, start_ms, end_ms, k):
+    """Point-in-time universe: at the start of every month, the top-k coins by the previous 30 days'
+    dollar volume, among coins that already had 1 year of daily history. -> {'YYYY-MM': set(syms)}"""
+    out = {}
+    idx = {s: {x["t"]: i for i, x in enumerate(D)} for s, D in D1.items()}
+    d = start_ms // DAY * DAY
+    while d <= end_ms:
+        mk = datetime.fromtimestamp(d / 1000, timezone.utc).strftime("%Y-%m")
+        if mk not in out:
+            score = []
+            for s, D in D1.items():
+                j = idx[s].get(d)
+                if j is None:
+                    j = bisect.bisect_left([x["t"] for x in D], d)
+                if j < 365:
+                    continue
+                vol = sum(x["v"] * x["c"] for x in D[max(0, j - 30):j])
+                score.append((vol, s))
+            score.sort(reverse=True)
+            out[mk] = {s for _, s in score[:k]}
+        d += DAY
+    return out
+
+
+def donchian_account(D1, syms, start_ms, end_ms, balance, scale, legs_cache, lookbacks=None, universe=None, k=None):
     """Real account: every (coin, lookback) breakout is one leg, sized ONCE at entry
-    (equity x scale x 1/9 x vol-target / coins) and held until its trailing stop - no daily resizing.
+    (equity x scale x 1/len(lookbacks) x vol-target / k) and held until its trailing stop (no daily resizing).
+    universe: {'YYYY-MM': set} -> new legs only for coins in that month's universe (point-in-time).
     Compounding, fees 0.05%/side, longs pay 0.01%/8h funding, marked to market daily."""
-    n_univ = len(syms)
+    lookbacks = lookbacks or DONCHIAN_N
+    k = k or len(syms)
     legs, ev = [], {}
     for sym in syms:
         D = D1[sym]
@@ -425,8 +451,12 @@ def donchian_account(D1, syms, start_ms, end_ms, balance, scale, legs_cache):
         cl = [x["c"] for x in D]
         rets = [0.0] + [cl[i] / cl[i - 1] - 1 for i in range(1, len(cl))]
         for N, ei, xi in legs_cache[sym]:
-            if ei < 365 or D[ei]["t"] < start_ms:
-                continue                                   # needs 1 year of history; account starts flat
+            if N not in lookbacks or ei < 365 or D[ei]["t"] < start_ms:
+                continue                                   # 1 year of history; the account starts flat
+            if universe is not None:
+                mk = datetime.fromtimestamp(D[ei]["t"] / 1000, timezone.utc).strftime("%Y-%m")
+                if sym not in universe.get(mk, ()):
+                    continue
             win = rets[ei - 89:ei + 1]
             m = sum(win) / 90
             sd = math.sqrt(sum((r - m) ** 2 for r in win) / 89) * math.sqrt(365)
@@ -440,7 +470,7 @@ def donchian_account(D1, syms, start_ms, end_ms, balance, scale, legs_cache):
     px = {sym: {x["t"]: x["c"] for x in D1[sym]} for sym in syms}
     last = {}
     cash, open_ = balance, {}
-    peak, mdd, eq = balance, 0.0, balance
+    peak, mdd, eq, prev_eq = balance, 0.0, balance, balance
     months, closed, sizes, orders, max_expo = {}, [], [], {}, 0.0
     d = start_ms // DAY * DAY
     while d <= end_ms:
@@ -452,18 +482,16 @@ def donchian_account(D1, syms, start_ms, end_ms, balance, scale, legs_cache):
             if kind == "x" and lid in open_:
                 L, notional = legs[lid], open_.pop(lid)
                 held = (L["x_t"] - L["e_t"]) / DAY
-                pnl = notional * (L["x_px"] / L["e_px"] - 1) - notional * 2 * FEE_SIDE - notional * FUND_8H * 3 * held
-                cash += pnl
-                closed.append((d, pnl))
+                cash += (notional * (L["x_px"] / L["e_px"] - 1) - notional * 2 * FEE_SIDE
+                         - notional * FUND_8H * 3 * held)
+                closed.append(notional * (L["x_px"] / L["e_px"] - 1))
         unreal = sum(n_ * (last.get(legs[l]["sym"], legs[l]["e_px"]) / legs[l]["e_px"] - 1) for l, n_ in open_.items())
         eq = cash + unreal
         for kind, lid in todays:
             if kind == "e" and eq > 0:
-                L = legs[lid]
-                notional = eq * scale * (1 / len(DONCHIAN_N)) * L["vs"] / n_univ
+                notional = eq * scale * (1 / len(lookbacks)) * legs[lid]["vs"] / k
                 open_[lid] = notional
-                sizes.append(notional)
-        for kind, lid in todays:
+                sizes.append(notional / eq)                # as a fraction of equity
             orders[(legs[lid]["sym"], d)] = 1
         unreal = sum(n_ * (last.get(legs[l]["sym"], legs[l]["e_px"]) / legs[l]["e_px"] - 1) for l, n_ in open_.items())
         eq = cash + unreal
@@ -472,52 +500,69 @@ def donchian_account(D1, syms, start_ms, end_ms, balance, scale, legs_cache):
         peak = max(peak, eq)
         mdd = min(mdd, eq / peak - 1)
         mk = datetime.fromtimestamp(d / 1000, timezone.utc).strftime("%Y-%m")
-        mo = months.setdefault(mk, {"start": eq if not months else None, "end": eq, "peak": eq, "dd": 0.0})
-        if mo["start"] is None:
-            mo["start"] = prev_eq
+        if mk not in months:
+            months[mk] = {"start": prev_eq, "end": eq, "peak": eq, "dd": 0.0}
+        mo = months[mk]
         mo["end"] = eq
         mo["peak"] = max(mo["peak"], eq)
         mo["dd"] = min(mo["dd"], eq - mo["peak"])
         prev_eq = eq
         d += DAY
-    n_days = (end_ms - start_ms) / DAY
-    wins = sum(1 for _, p in closed if p > 0)
-    n_months = max(1, len(months))
+    n_days = max(1.0, (end_ms - start_ms) / DAY)
+    ss = sorted(sizes)
+    p10 = ss[len(ss) // 10] if ss else 0.0
+    years = {}
+    for mk, mo in months.items():
+        y = mk[:4]
+        years.setdefault(y, [mo["start"], mo["end"]])[1] = mo["end"]
     return {"final": eq, "cagr": (eq / balance) ** (365 / n_days) - 1 if eq > 0 else -1.0, "mdd": mdd,
-            "months": months, "closed": len(closed), "wins": wins, "open": len(open_),
-            "avg_size": sum(sizes) / len(sizes) if sizes else 0.0, "min_size": min(sizes) if sizes else 0.0,
-            "small": sum(1 for x in sizes if x < MIN_NOTIONAL) / len(sizes) if sizes else 0.0,
-            "orders_pm": len(orders) / n_months, "max_expo": max_expo, "legs": len(sizes)}
+            "months": months, "years": {y: v[1] / v[0] - 1 for y, v in years.items()},
+            "closed": len(closed), "wins": sum(1 for p in closed if p > 0),
+            "p10": p10, "orders_pm": len(orders) / max(1, len(months)), "max_expo": max_expo, "legs": len(sizes)}
+
+
+PRACTICAL_N = [20, 60, 150]
 
 
 def run_donchian_account(D1, start_ms, end_ms, balance, days):
-    ranked = [s for s in bot.SYMBOLS if s in D1]
+    pool = [s for s in bot.SYMBOLS if s in D1]
     cache = {}
-    unis = [(f"top {len(ranked)}", ranked)]
-    for k in (20, 10):
-        if len(ranked) > k:
-            unis.append((f"top {k}", ranked[:k]))
-    unis.append(("BTC + ETH", [s for s in ("BTCUSDT", "ETHUSDT") if s in D1]))
-    lines = [f"💼 <b>Donchian long-only – account backtest</b> (last {days} days, ${balance:g} start)",
-             "Every breakout leg sized once at entry (no daily resizing), compounding, fees 0.05%/side, "
-             "longs pay funding 0.01%/8h. Scale 1x = paper sizing (25% vol target)."]
+    u20 = pit_universe(D1, start_ms, end_ms, 20)
+    u10 = pit_universe(D1, start_ms, end_ms, 10)
+    avg20 = sum(len(v) for v in u20.values()) / max(1, len(u20))
+    configs = [
+        ("A. Point-in-time top 20, 9 lookbacks (paper)", DONCHIAN_N, u20, 20),
+        ("B. Point-in-time top 10, 9 lookbacks", DONCHIAN_N, u10, 10),
+        ("C. Point-in-time top 20, 3 lookbacks 20/60/150 (practical)", PRACTICAL_N, u20, 20),
+        ("D. Point-in-time top 10, 3 lookbacks 20/60/150 (practical)", PRACTICAL_N, u10, 10),
+        ("Ref: TODAY's top 20, 9 lookbacks (biased – for comparison)", DONCHIAN_N, None, 20),
+    ]
+    lines = [f"💼 <b>Donchian long-only – bias check + practical version</b> (last {days} days, ${balance:g} start, "
+             f"pool = today's top {len(pool)}, avg {avg20:.0f} coins eligible for top 20)",
+             "Point-in-time = each month the top coins by the previous 30 days' volume at that time (coins need 1 year "
+             "of history). Legs sized once at entry, compounding, fees 0.05%/side, longs pay 0.01%/8h funding."]
     detail = None
-    for name, syms in unis:
+    for name, lbs, uni, k in configs:
+        syms = pool[:20] if uni is None else pool
         lines.append(f"\n<b>{name}</b>")
-        for sc in (1, 2, 3, 4):
-            r = donchian_account(D1, syms, start_ms, end_ms, balance, sc, cache)
-            lines.append(f"{sc}x: ${balance:g} → <b>${r['final']:.2f}</b> ({(r['final'] / balance - 1) * 100:+.1f}%, "
-                         f"CAGR {r['cagr'] * 100:+.1f}%) | max DD {r['mdd'] * 100:.1f}% | max exposure {r['max_expo'] * 100:.0f}%")
-            if sc == 3 and (name.startswith("top 20") or detail is None):
-                detail = (name, r)
-        lines.append(f"legs {r['legs']} (win {r['wins'] / max(1, r['closed']) * 100:.0f}% of closed), "
-                     f"~{r['orders_pm']:.0f} orders/month, avg order ${r['avg_size'] * 3 / 4:.2f} at 3x, "
-                     f"{r['small'] * 100:.0f}% of orders below ${MIN_NOTIONAL:g} at 4x")
-    msg1 = "\n".join(lines)
-    out = [msg1]
+        r3 = None
+        for sc in (1, 2, 3):
+            r = donchian_account(D1, syms, start_ms, end_ms, balance, sc, cache, lbs, uni, k)
+            yrs = " ".join(f"{y}:{v * 100:+.0f}%" for y, v in r["years"].items())
+            lines.append(f"{sc}x: ${balance:g} → <b>${r['final']:.2f}</b> (CAGR {r['cagr'] * 100:+.1f}%) | "
+                         f"max DD {r['mdd'] * 100:.1f}% | {yrs}")
+            if sc == 3:
+                r3 = r
+        need = MIN_NOTIONAL / r3["p10"] if r3["p10"] > 0 else 0.0
+        lines.append(f"~{r3['orders_pm']:.0f} orders/month, win {r3['wins'] / max(1, r3['closed']) * 100:.0f}% of closed legs, "
+                     f"max exposure {r3['max_expo'] * 100:.0f}% at 3x; capital for 90% of orders ≥ ${MIN_NOTIONAL:g} at 3x: "
+                     f"~${need:,.0f}")
+        if name.startswith("C."):
+            detail = (name, r3)
+    out = ["\n".join(lines)]
     if detail:
         name, r = detail
-        rows = [f"📅 <b>Month by month – Donchian long-only, {name}, 3x</b> (${balance:g} start)"]
+        rows = [f"📅 <b>Month by month – {name.split(' (')[0]}, 3x</b> (${balance:g} start)"]
         pos = 0
         for mk, mo in r["months"].items():
             pnl = mo["end"] - mo["start"]
@@ -562,6 +607,30 @@ def main():
     start_ms = (now - days * DAY) // DAY * DAY
     need_h = (days + 420) * 24
     H1, D1, H4 = {}, {}, {}
+    if args.account:                                  # daily candles only (keeps memory low for a big pool)
+        for sym in bot.SYMBOLS:
+            try:
+                C, _ = bot.fetch_history(sym, "1h", need_h)
+            except Exception as e:
+                print("ERROR", sym, e)
+                continue
+            bot._FUT_CACHE.clear()
+            if len(C) >= 24 * 60:
+                D1[sym] = bot._aggregate(C, 24)
+                print(f"{sym}: {len(D1[sym])} d")
+            del C
+        if "BTCUSDT" not in D1:
+            bot.tg("⚠️ Donchian account: no BTC data")
+            return
+        end_ms = D1["BTCUSDT"][-1]["t"]
+        msgs = run_donchian_account(D1, start_ms, end_ms, args.balance, days)
+        for m_ in msgs:
+            bot.tg(m_)
+            print(m_)
+        if os.getenv("GITHUB_STEP_SUMMARY"):
+            with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as fh:
+                fh.write("## Donchian account\n\n" + re.sub(r"</?b>", "**", "\n\n".join(msgs)).replace("\n", "  \n") + "\n")
+        return
     for sym in bot.SYMBOLS:
         try:
             C, src = bot.fetch_history(sym, "1h", need_h)
@@ -579,16 +648,6 @@ def main():
         return
     n = len(H1)
     btc = {"BTCUSDT": D1["BTCUSDT"]}
-    if args.account:
-        end_ms = D1["BTCUSDT"][-1]["t"]
-        msgs = run_donchian_account(D1, start_ms, end_ms, args.balance, days)
-        for m_ in msgs:
-            bot.tg(m_)
-            print(m_)
-        if os.getenv("GITHUB_STEP_SUMMARY"):
-            with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as fh:
-                fh.write("## Donchian account\n\n" + re.sub(r"</?b>", "**", "\n\n".join(msgs)).replace("\n", "  \n") + "\n")
-        return
 
     # BTC regime (daily ADX 14, last closed day)
     BD = D1["BTCUSDT"]
