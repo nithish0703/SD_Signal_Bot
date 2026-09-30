@@ -22,37 +22,22 @@
    "sym": "LTCUSDT",
    "tf": "1h",
    "usd": -1.04
+  },
+  {
+   "closed": 1790794939,
+   "net": -1.044,
+   "r": -1.0,
+   "side": "LONG",
+   "simple": -1.044,
+   "strategy": "smc",
+   "sym": "APTUSDT",
+   "tf": "1h",
+   "usd": -0.96
   }
  ],
  "last_error_alert": 0,
  "last_heartbeat": "2026-09-30",
- "open": {
-  "APTUSDT|LONG|smc|1h|1790748000000": {
-   "cancel": 0.8325914014871846,
-   "entry": 0.79615,
-   "expires_ct": 1790859599999,
-   "fee_r": 0.043694806868500066,
-   "fut": {
-    "entry": 0.7956686517533254,
-    "ratio": 0.9993954050785974,
-    "sl": 0.7766815081857141,
-    "tp": 0.8543831318016929
-   },
-   "kind": "smc",
-   "last_ct": 1790791199999,
-   "opened": 1790773199999,
-   "risk": 0.018220700743592277,
-   "side": "LONG",
-   "sl": 0.7779292992564077,
-   "slp": 2.288601487608149,
-   "source": "spot-vision",
-   "status": "filled",
-   "sym": "APTUSDT",
-   "tf": "1h",
-   "tp": 0.8549,
-   "usd_r": 0.9154405950432596
-  }
- },
+ "open": {},
  "sent": {
   "APTUSDT|LONG|smc|1h|1790748000000": 1790773337,
   "FILUSDT|LONG|smc|1h|1790748000000": 1790773330,
