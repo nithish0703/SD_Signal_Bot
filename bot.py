@@ -2605,7 +2605,14 @@ def _exit_detail(C, s, side, kind, v, sl):
     if kind == "price_be":                                   # liquidity TP + breakeven stop at v x R
         be_trig, cover = E + v * risk, abs(s["entry"]) * FEE_PCT / 100
         kind = "price"
-    if kind == "price":                                      # fixed target price (SMC liquidity TP)
+    trail_after = None
+    if kind in ("price_min", "price_cap"):                  # liquidity TP, but at least / at most v x R
+        liq = _px(s["tp"], side)
+        tp = max(liq, E + v * risk) if kind == "price_min" else min(liq, E + v * risk)
+        kind = "fixed"
+    elif kind == "price_trail":                              # liquidity TP reached -> keep a runner, trail v x ATR
+        kind, tp, trail_after = "fixed", _px(s["tp"], side), v * s["atr"]
+    elif kind == "price":                                    # fixed target price (SMC liquidity TP)
         kind, tp = "fixed", _px(s["tp"], side)
     else:
         tp = E + v * risk if kind == "fixed" else None
@@ -2615,6 +2622,11 @@ def _exit_detail(C, s, side, kind, v, sl):
         hi, lo, op = (x["h"], x["l"], x["o"]) if side == "LONG" else (-x["l"], -x["h"], -x["o"])
         if lo <= stop:
             return _px(min(op, stop), side), i
+        if kind == "fixed" and trail_after is not None:
+            if best >= tp or hi >= tp:                       # target reached: trail from the best price
+                best = max(best, hi)
+                stop = max(stop, tp - trail_after, best - trail_after)
+            continue
         if kind == "fixed":
             if hi >= tp:
                 return _px(tp, side), i
@@ -2728,7 +2740,15 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
         mode = "risk"
     RISK_USD = risk
     strategy = strategy or ("smc" if STRATEGY == "both" else STRATEGY)
-    if strategy == "smc":
+    rr_sweep = strategy == "smc_rr"                              # same SMC trades, many exit / R:R rules
+    if rr_sweep:
+        strategy = "smc"
+        exits = [("Liquidity TP (live)", "price", None),
+                 ("Fixed 1.5R", "fixed", 1.5), ("Fixed 2R", "fixed", 2.0), ("Fixed 2.5R", "fixed", 2.5),
+                 ("Fixed 3R", "fixed", 3.0), ("Fixed 4R", "fixed", 4.0), ("Fixed 5R", "fixed", 5.0),
+                 ("Liquidity, at least 2R", "price_min", 2.0), ("Liquidity, at most 4R", "price_cap", 4.0),
+                 ("Liquidity, then trail 2 ATR", "price_trail", 2.0), ("Trail 3 ATR (no target)", "trail", 3.0)]
+    elif strategy == "smc":
         if SMC_BE:
             exits = [(f"Liquidity TP + BE {SMC_BE:g}R", "price_be", SMC_BE), ("Liquidity TP (no BE)", "price", None),
                      ("Fixed 3R", "fixed", 3.0), ("Fixed 2R", "fixed", 2.0)]
@@ -2826,6 +2846,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                     max_dd = max(max_dd, peak - eq)
 
         loss_ev = []                                             # (close_ct, sym, side) of losing trades
+        half_ms, halves = start_ms + days * 43200000, [0.0, 0.0]   # P&L of the 1st / 2nd half of the period
         skipped_rule = 0
         bar_count = {}                                           # new trades per candle
         for c in cands:
@@ -2868,6 +2889,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 p = pnl(c, px, maker) * k
                 open_[c["sym"]] = (ct, m_i + p, c["side"], m_i)
                 pnls.append(("closed", p))
+                halves[ct > half_ms] += p
                 wins += p > 0
                 if p < 0:
                     loss_ev.append((ct, c["sym"], c["side"]))
@@ -2903,7 +2925,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                         "open": len(open_), "unreal": unreal, "wins": wins, "fees": fees,
                         "dd": max_dd, "max_open": max_open, "skip_cash": skipped_cash,
                         "skip_coin": skipped_coin, "skip_rule": skipped_rule, "best": max(closed, default=0),
-                        "worst": min(closed, default=0), "streak": worst, "liqs": liqs})
+                        "worst": min(closed, default=0), "streak": worst, "liqs": liqs, "halves": halves})
 
     levs = [c["lev"] for c in cands] or [leverage]
     how = (f"{risk_pct:g}% of balance risked per trade (compounding; starts at ${margin:g} margin / ~${risk:g} loss), "
@@ -2944,7 +2966,8 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 + (f", {r['open']} still open ({money(r['unreal'])})" if r["open"] else "")
                 + (f", skipped {r['skip_cash']} (no free balance)" if r["skip_cash"] else "")
                 + (f", {r['skip_rule']} blocked by risk rules" if r.get("skip_rule") else "")
-                + (f", {r['liqs']} liquidated" if r["liqs"] else "") + "\n")
+                + (f", {r['liqs']} liquidated" if r["liqs"] else "")
+                + (f"\n1st half {money(r['halves'][0])} | 2nd half {money(r['halves'][1])}" if rr_sweep else "") + "\n")
     msg += "\nFunding & slippage not included. Full table: GitHub → Actions → run summary."
     tg(msg)
     send_monthly(trade_log, balance, exits[0][0])
@@ -2967,7 +2990,8 @@ def main():
                     help="risk = same $ loss per trade (default), fixed = margin x leverage, "
                          "compound = --risk is a %% of the current balance")
     ap.add_argument("--risk", type=float, default=1.0, help="$ loss at SL in risk sizing")
-    ap.add_argument("--strategy", choices=["smc", "sd", ""], default="", help="account mode strategy")
+    ap.add_argument("--strategy", choices=["smc", "smc_rr", "sd", ""], default="",
+                    help="account mode strategy (smc_rr = SMC trades with many exit / R:R rules side by side)")
     ap.add_argument("--top-n", type=int, default=0, help="account/backtest: number of top futures coins")
     ap.add_argument("--entry", choices=["default", "mid", "top", "ote", "ob", ""], default="",
                     help="smc/account: entry model to test (mid = FVG 50%%, top = FVG edge, ote = ICT OTE, ob = order block)")
