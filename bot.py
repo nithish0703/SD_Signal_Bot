@@ -216,7 +216,9 @@ def fetch_futures_1h(fut, hours):
     while m < this_month:
         urls.append(FUT_KLINE_URL.format(period="monthly", s=fut, d=m.strftime("%Y-%m")))
         m = datetime(m.year + (m.month == 12), m.month % 12 + 1, 1, tzinfo=timezone.utc)
-    d = max(this_month, start).date()
+    # daily files for the last ~45 days too: last month's monthly file is only published a few days
+    # into the new month, so without these the whole previous month would be missing (duplicates are merged)
+    d = max(this_month - timedelta(days=45), start).date()
     while d < now.date():
         urls.append(FUT_KLINE_URL.format(period="daily", s=fut, d=d.isoformat()))
         d += timedelta(days=1)
@@ -1433,7 +1435,9 @@ def scan_smc(st, sym, C, H, src, btc_fn=None):
             continue
         if "SMC_MAX_FILL" in SMC_ACTIVE:                  # validated: only wait N candles for the fill
             x["expires_ct"] = min(x["expires_ct"],
-                                  x["time"] + int(SMC_ACTIVE["SMC_MAX_FILL"]) * (C[-1]["ct"] - C[-1]["t"] + 1))
+                                  # +1: the fill candle may be N candles after the setup candle, matching the
+                                  # backtest rule fill_wait <= N (fill_wait counts from the candle after the signal)
+                                  x["time"] + (int(SMC_ACTIVE["SMC_MAX_FILL"]) + 1) * (C[-1]["ct"] - C[-1]["t"] + 1))
         key = f"{sym}|{x['side']}|smc|{TIMEFRAME}|{x['sweep_t']}"
         if key in st["sent"]:
             continue
@@ -2033,6 +2037,7 @@ def _smc_long(C, H, entry_mode, pending=False):
         q["below_mo"] = mi is None or entry < o[mi]                      # long below NY midnight open = discount of the day
         q["ote_fvg"] = zb <= ote_hi and zt >= ote_lo                     # FVG sits inside the OTE zone
         q["has_ob"] = ob is not None
+        q["ob_fvg"] = ob is not None and l[ob] <= zt and h[ob] >= zb       # order block overlaps the FVG (confluence)
         q["weekend"] = datetime.fromtimestamp(C[sg]["ct"] / 1000, timezone.utc).weekday() >= 5
         win = [v2 for v2 in atrp[max(0, sg - 720):sg + 1] if v2 is not None]   # ~30 days of 1h
         q["atr_pct"] = (sum(1 for v2 in win if v2 <= atrp[sg]) / len(win) * 100) if win and atrp[sg] else 50.0
