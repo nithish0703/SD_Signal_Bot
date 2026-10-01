@@ -159,7 +159,7 @@ def main():
         n, avg, tot, win = wf.agg(groups[k])
         ls = sum(-wf.net(t) for t in groups[k] if wf.net(t) < 0) / loss_total * 100
         out.append(f"| {k} | {n} | {win:.0f}% | {avg:+.2f} | {tot:+.1f} | {ls:.0f}% |")
-        st_lines.append(f"{k}: {n} trades, {avg:+.2f}R, {ls:.0f}% of losses")
+        st_lines.append(f"{bot.esc(k)}: {n} trades, {avg:+.2f}R, {ls:.0f}% of losses")   # "<" breaks Telegram HTML
 
     passed = [n for n, _ in VARIANTS if res[n].get("ok")]
     tg.append("Stage of weakness (A trades):\n" + "\n".join("• " + s for s in st_lines))

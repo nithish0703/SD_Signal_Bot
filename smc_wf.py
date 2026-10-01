@@ -178,7 +178,7 @@ def main():
             n2, a2, _, _ = agg(h2)
             same = "worse" if (a1 < avg - 0.15 and a2 < avg - 0.15) else "better" if (a1 > avg + 0.15 and a2 > avg + 0.15) else ""
             if same and n1 >= 15 and n2 >= 15:
-                flags.append(f"{name}: {b} → {same} in both halves ({n1}: {a1:+.2f}R, {n2}: {a2:+.2f}R)")
+                flags.append(bot.esc(f"{name}: {b} → {same} in both halves ({n1}: {a1:+.2f}R, {n2}: {a2:+.2f}R)"))
             out.append(f"| {name} | {b} | {n1} / {a1:+.2f}R | {n2} / {a2:+.2f}R | {same or '–'} |")
 
     # ---------------- C. walk-forward folds
