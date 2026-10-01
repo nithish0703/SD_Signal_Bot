@@ -624,10 +624,13 @@ def resolve_symbols(allow_build=True):
                                for r in info["table"]]}
                 with open(UNIVERSE_FILE, "w") as f:
                     json.dump(u, f, indent=1)
-                drop = ", ".join(f"{k} {v}" for k, v in info["dropped"].items()) or "none"
-                top = ", ".join(r["sym"].replace("USDT", "") for r in info["table"][:10])
-                tg(f"🪙 <b>Coin list updated</b> (best {len(syms)} of top {info['pool']})\n"
-                   f"Removed by safety limits: {drop}\nTop 10 by score: {top}")
+                drop = "\n".join(f"{k} — {v} coins" for k, v in info["dropped"].items()) or "none"
+                t10 = [r["sym"].replace("USDT", "") for r in info["table"][:10]]
+                top = " • ".join(t10[:5]) + ("\n" + " • ".join(t10[5:]) if len(t10) > 5 else "")
+                tg(f"🪙 <b>COIN LIST UPDATED</b>\n\n"
+                   f"📊 Top {info['pool']} → Best {len(syms)}\n\n"
+                   f"❌ <b>Removed</b>\n{drop}\n\n"
+                   f"🏆 <b>TOP 10</b>\n{top}")
                 print(f"Scored coin universe: {', '.join(SYMBOLS)}")
                 return
             except Exception as e:
@@ -950,6 +953,19 @@ def notify(text, title, priority=3, tags=None):
     return ok
 
 
+def esc(t):
+    return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def usd_txt(v):
+    return f"{'+' if v >= 0 else '-'}${abs(v):.2f}"
+
+
+def trade_head(title, sym, side, tf):
+    return (f"{title} — {sym}</b>\n"
+            f"{'🟢 LONG' if side == 'LONG' else '🔴 SHORT'} • {tf.upper()}\n")
+
+
 def fp(x):
     ax = abs(x)
     d = 2 if ax >= 100 else 3 if ax >= 10 else 4 if ax >= 1 else 5 if ax >= 0.1 else 6 if ax >= 0.01 else 8
@@ -1137,6 +1153,18 @@ def manage_trades(st, cache):
                 tr["notified_stop"] = tr["stop"]
 
 
+def short_stats(st, days=None, strategy=None):
+    rows = st["closed"]
+    if strategy:
+        rows = [c for c in rows if c.get("strategy", "sd") == strategy]
+    if days:
+        rows = [c for c in rows if c["closed"] > time.time() - days * 86400]
+    if not rows:
+        return "no trades yet"
+    w = sum(1 for c in rows if c["net"] > 0)
+    return f"{len(rows)} trades | {w / len(rows) * 100:.1f}% | {sum(c['net'] for c in rows):+.1f}R"
+
+
 def paper_stats(st, days=None, strategy=None):
     rows = st["closed"]
     if strategy:
@@ -1180,26 +1208,28 @@ SHORT_FILTER_NAMES = {
 
 
 def smc_message(sym, s, source, fl=None):
-    """Short signal: futures-ready prices when fl (futures_levels) is given, else spot prices."""
+    """New signal card. Futures-ready prices when fl (futures_levels) is given, else spot prices."""
     if fl:
         s = dict(s, entry=fl["entry"], sl=fl["sl"], tp=fl["tp"], cancel=fl["cancel"])
     buy = s["side"] == "LONG"
     risk = abs(s["entry"] - s["sl"])
     tp_r = abs(s["tp"] - s["entry"]) / risk
-    until = datetime.fromtimestamp(s["expires_ct"] / 1000, IST).strftime("%d %b, %I:%M %p IST")
+    exp = datetime.fromtimestamp(s["expires_ct"] / 1000, IST)
+    until = exp.strftime("%I:%M %p") if exp.date() == datetime.now(IST).date() else exp.strftime("%d %b, %I:%M %p")
     opts = [sizing(s, s["side"], m) for m in MARGIN_OPTIONS]
     pair = (sym[:-4] + "/USDT") if sym.endswith("USDT") else sym
     return (
-        f"{'🟢' if buy else '🔴'} <b>{pair} — LIMIT {'BUY' if buy else 'SELL'}</b> | {TIMEFRAME.upper()}\n"
+        f"{'🟢' if buy else '🔴'} <b>{'BUY' if buy else 'SELL'} — {pair}</b>\n"
+        f"⏱ {TIMEFRAME.upper()} • LIMIT\n"
         + (f"⚠️ Futures symbol: <b>{FUTURES_NAME[sym]}</b>\n" if sym in FUTURES_NAME else "")
-        + f"🕒 {datetime.now(IST).strftime('%d %b %Y, %I:%M %p IST')}\n"
-        f"📍 Entry: <code>{fp(s['entry'])}</code>\n"
-        f"🛑 SL: <code>{fp(s['sl'])}</code> ({(s['sl'] - s['entry']) / s['entry'] * 100:+.2f}%)\n"
-        f"🎯 TP: <code>{fp(s['tp'])}</code> ({(s['tp'] - s['entry']) / s['entry'] * 100:+.2f}%, {tp_r:.1f}R)\n\n"
-        + "".join(f"💰 ${o['margin']:g} ({o['lev']}x) → SL −${o['loss']:.2f} | TP +${o['loss'] * tp_r:.2f}\n" for o in opts)
-        + f"\n⏳ Valid: {until}\n"
-        f"🚫 Cancel if price → <code>{fp(s['cancel'])}</code> before fill"
-        + ("" if fl else "\n(spot prices – futures data not available)")
+        + f"\n💵 Entry   <code>{fp(s['entry'])}</code>\n"
+        f"🛑 SL      <code>{fp(s['sl'])}</code>  ({(s['sl'] - s['entry']) / s['entry'] * 100:+.2f}%)\n"
+        f"🎯 TP      <code>{fp(s['tp'])}</code>  ({(s['tp'] - s['entry']) / s['entry'] * 100:+.2f}%)\n"
+        f"📊 R:R     1 : {tp_r:.1f}\n\n"
+        + "".join(f"💰 ${o['margin']:g} → -${o['loss']:.2f} / +${o['loss'] * tp_r:.2f}\n" for o in opts)
+        + f"\n⏳ Valid till {until}\n"
+        f"🚫 Cancel {'above' if buy else 'below'} <code>{fp(s['cancel'])}</code>"
+        + ("" if fl else "\nℹ️ Spot prices (futures data not available)")
     )
 
 
@@ -1248,25 +1278,37 @@ def update_smc(tr, candles):
 
 
 def manage_smc(st, key, tr, candles):
-    icon = "🟢" if tr["side"] == "LONG" else "🔴"
-    name = f"{icon} <b>SMC {tr['side']} {tr['sym']}</b> ({tr['tf']})"
+    sym, side, tf = tr["sym"], tr["side"], tr["tf"]
+    fu = tr.get("fut") or {}
+    E = fu.get("entry", tr["entry"])                       # show the levels the user actually set
+    TPx = fu.get("tp", tr["tp"])
     for ev in update_smc(tr, candles):
         if ev[0] == "filled":
-            fu = tr.get("fut")
-            if fu:
-                notify(f"✅ {name}: limit order <b>filled</b> at <code>{fp(fu['entry'])}</code>\n"
-                       f"SL <code>{fp(fu['sl'])}</code> | TP <code>{fp(fu['tp'])}</code> (futures) – make sure both are set.",
-                       f"FILLED {tr['sym']} {tr['side']}", 4, ["white_check_mark"])
-            else:
-                notify(f"✅ {name}: limit order <b>filled</b> at <code>{fp(ev[1])}</code>\n"
-                       f"SL <code>{fp(tr['sl'])}</code> | TP <code>{fp(tr['tp'])}</code> – make sure both are set.",
-                       f"FILLED {tr['sym']} {tr['side']}", 4, ["white_check_mark"])
+            SLx = fu.get("sl", tr["sl"])
+            tp_r = abs(tr["tp"] - tr["entry"]) / tr["risk"]
+            notify(f"✅ <b>" + trade_head("FILLED", sym, side, tf) + "\n"
+                   f"💵 Entry   <code>{fp(E)}</code>\n"
+                   f"🛑 SL      <code>{fp(SLx)}</code>\n"
+                   f"🎯 TP      <code>{fp(TPx)}</code>\n\n"
+                   f"📊 Risk    -1.00R\n"
+                   f"🎯 Reward  +{tp_r:.2f}R\n\n"
+                   f"🔒 SL + TP SET",
+                   f"✅ FILLED — {sym} {side}", 4, ["white_check_mark"])
         elif ev[0] == "be":
-            tg(f"🛡 {name}: price reached +{SMC_BE:g}R – <b>move SL to breakeven</b> "
-               f"<code>{fp(ev[1])}</code> (entry + fees). Loss is no longer possible.")
+            be_px = ev[1] * fu["ratio"] if fu.get("ratio") else ev[1]
+            tg(f"🛡 <b>" + trade_head("BREAKEVEN", sym, side, tf) + "\n"
+               f"📈 +{SMC_BE:g}R reached\n\n"
+               f"💵 Entry   <code>{fp(E)}</code>\n"
+               f"🔒 SL      <code>{fp(be_px)}</code>\n"
+               f"🎯 TP      <code>{fp(TPx)}</code>\n\n"
+               f"✅ Trade protected")
         elif ev[0] == "cancelled":
-            notify(f"❌ {name}: <b>cancel the limit order</b> ({ev[1]}). No trade.",
-                   f"CANCEL {tr['sym']} order", 4, ["x"])
+            ran = "ran away" in str(ev[1])
+            why = (("📈" if side == "LONG" else "📉") + " Price ran away") if ran else "⏰ Order expired"
+            notify(f"❌ <b>CANCELLED — {sym}</b>\n"
+                   f"{'🟢 LONG' if side == 'LONG' else '🔴 SHORT'} • LIMIT\n\n"
+                   f"{why}\n📌 Never filled\n💰 No trade",
+                   f"❌ CANCELLED — {sym}", 4, ["x"])
             st.setdefault("cancelled", 0)
             st["cancelled"] += 1
             del st["open"][key]
@@ -1275,20 +1317,27 @@ def manage_smc(st, key, tr, candles):
             r = ev[2]
             net = r - tr["fee_r"]
             usd = net * tr.get("usd_r", RISK_USD)
-            what = "🎯 TP hit" if r > 0.3 else ("⚖️ breakeven" if tr.get("be") and r > -0.1 else "🛑 SL hit")
             px = ev[1]
-            if tr.get("fut"):                                  # show the futures level the user actually set
-                fu = tr["fut"]
-                if abs(ev[1] - tr["tp"]) <= abs(tr["tp"]) * 1e-9:
-                    px = fu["tp"]
-                elif abs(ev[1] - tr["sl"]) <= abs(tr["sl"]) * 1e-9:
-                    px = fu["sl"]
-                else:
-                    px = ev[1] * fu["ratio"]
-            notify(f"🏁 {name} closed at <code>{fp(px)}</code> – {what}\n"
-               f"Result: <b>{r:+.2f}R</b> (after fees ~{net:+.2f}R ≈ <b>{'+' if usd >= 0 else '−'}${abs(usd):.2f}</b>)",
-                   f"CLOSED {tr['sym']} {'TP' if r > 0.3 else 'SL'} {'+' if usd >= 0 else '-'}${abs(usd):.2f}", 3,
-                   ["tada" if r > 0 else "red_circle"])
+            at_tp = abs(ev[1] - tr["tp"]) <= abs(tr["tp"]) * 1e-9
+            at_sl = abs(ev[1] - tr["sl"]) <= abs(tr["sl"]) * 1e-9
+            if fu:                                             # futures level the user actually set
+                px = fu["tp"] if at_tp else fu["sl"] if (at_sl and not tr.get("be")) else ev[1] * fu["ratio"]
+            if at_tp:
+                icon, title, end, tag = "🎯", "TP HIT", "✅ PROFIT", "tada"
+            elif tr.get("be") and r > -0.1:
+                icon, title, end, tag = "⚖️", "BREAKEVEN", "🔒 PROTECTED", "white_check_mark"
+            elif at_sl or r < 0:
+                icon, title, end, tag = "🛑", "SL HIT" if at_sl else "TIME EXIT", "❌ LOSS", "red_circle"
+            else:
+                icon, title, end, tag = "⏰", "TIME EXIT", "✅ PROFIT", "tada"
+            r_txt = f"~{r:.2f}R" if title == "BREAKEVEN" else f"{r:+.2f}R"
+            usd_s = f"~${abs(usd):.2f}" if title == "BREAKEVEN" else usd_txt(usd)
+            notify(f"{icon} <b>" + trade_head(title, sym, side, tf) + "\n"
+                   f"💵 Entry   <code>{fp(E)}</code>\n"
+                   f"🏁 Exit    <code>{fp(px)}</code>\n\n"
+                   f"📊 {r_txt}\n"
+                   f"💰 {usd_s} net\n\n{end}",
+                   f"{icon} {title} — {sym}" + ("" if title == "BREAKEVEN" else f" {usd_txt(usd)}"), 3, [tag])
             st["closed"].append({"sym": tr["sym"], "side": tr["side"], "tf": tr["tf"], "strategy": "smc",
                                  "r": round(r, 3), "net": round(net, 3), "simple": round(net, 3),
                                  "usd": round(usd, 2), "closed": int(time.time())})
@@ -1394,7 +1443,7 @@ def scan_smc(st, sym, C, H, src, btc_fn=None):
             print("futures levels error", sym, e)
             fl = None
         pair = sym[:-4] + "/USDT" if sym.endswith("USDT") else sym
-        if notify(smc_message(sym, x, src, fl), f"SIGNAL {pair} {'BUY' if x['side'] == 'LONG' else 'SELL'}",
+        if notify(smc_message(sym, x, src, fl), f"{'🟢 BUY' if x['side'] == 'LONG' else '🔴 SELL'} — {pair}",
                   5, ["rotating_light"]):
             st["sent"][key] = int(time.time())
             open_smc_trade(st, key, sym, x, src, C)
@@ -1442,18 +1491,27 @@ def run_scan():
     now = datetime.now(IST)
     today = now.strftime("%Y-%m-%d")
     if now.hour >= HEARTBEAT_HOUR_IST and st["last_heartbeat"] != today:
-        msg = (f"✅ <b>NKs SMC bot running</b>\nScanning {len(SYMBOLS)} coins on {TIMEFRAME} (+{HTF} trend)\n"
-               f"Signals in last 24h: {sum(1 for v in st['sent'].values() if v > time.time() - 86400)}\n"
-               f"Strategy: {STRATEGY.upper()} | open/pending trades: {len(st['open'])}\n\n📒 <b>Paper results</b>")
-        for strat in (("smc", "sd") if STRATEGY == "both" else (STRATEGY,)):
-            msg += (f"\n<b>{strat.upper()}</b> – last 30 days: {paper_stats(st, 30, strat)}\n"
-                    f"all time: {paper_stats(st, None, strat)}")
+        strats = ("smc", "sd") if STRATEGY == "both" else (STRATEGY,)
+        msg = (f"❤️ <b>BOT STATUS</b>\n\n"
+               f"🟢 Running\n"
+               f"🪙 {len(SYMBOLS)} Coins\n"
+               f"⏱ {TIMEFRAME.upper()} • Trend {HTF.upper()}\n\n"
+               f"📡 <b>Last 24H</b>\n"
+               f"Signals     {sum(1 for v in st['sent'].values() if v > time.time() - 86400)}\n"
+               f"Open Trades {len(st['open'])}\n\n"
+               f"📒 <b>RESULTS</b>")
+        for strat in strats:
+            pre = f"{strat.upper()} " if len(strats) > 1 else ""
+            msg += (f"\n{pre}30 Days → {short_stats(st, 30, strat)}"
+                    f"\n{pre}All Time → {short_stats(st, None, strat)}")
         if errors:
-            msg += f"\n\n⚠️ Errors this run: {len(errors)}\n" + "\n".join(errors[:3])
+            msg += f"\n\n⚠️ Errors: {len(errors)}\n" + "\n".join(f"└─ {esc(e)[:200]}" for e in errors[:3])
+        else:
+            msg += "\n\n✅ No errors"
         if tg(msg):
             st["last_heartbeat"] = today
     if errors and len(errors) == len(SYMBOLS) and time.time() - st["last_error_alert"] > 6 * 3600:
-        if tg("⚠️ <b>S&D bot:</b> could not fetch data for any coin.\n" + errors[0]):
+        if tg(f"⚠️ <b>DATA ERROR</b>\n\n❌ All {len(SYMBOLS)} coins failed\n🔎 {esc(errors[0])[:300]}\n\n⏳ Next alert after 6H"):
             st["last_error_alert"] = int(time.time())
 
     save_state(st)
@@ -2985,18 +3043,31 @@ def main():
         TOP_N = min(args.top_n, 150)                      # only for backtests; live scan keeps its setting
     resolve_symbols()
     if args.test:
-        ok = tg(f"👋 <b>S&D bot connected!</b>\n{len(SYMBOLS)} coins: "
-                f"{', '.join(f'{x} (={FUTURES_NAME[x]})' if x in FUTURES_NAME else x for x in SYMBOLS)}\n"
-                f"Timeframe: {TIMEFRAME} (trend: {HTF}), min grade: {MIN_SCORE}/6\n"
-                f"Min SL: {MIN_SL_PCT}%, fees assumed: {FEE_PCT:.2f}%\n"
-                f"Strategy: {STRATEGY.upper()}"
-                + (f" (SMC: {entry_name()}, discount {'on' if SMC_REQUIRE_DISCOUNT else 'off'}, "
-                   f"trend {'on' if SMC_REQUIRE_TREND else 'off'}, TP = liquidity)" if STRATEGY != "sd" else "") + "\n"
-                f"Filters: {active_filters()}\n"
-                + (f"SMC quality filters (validated): {smc_quality_txt()}\n" if STRATEGY != "sd" else "")
-                + f"Sizing: ${' / $'.join(f'{m:g}' for m in MARGIN_OPTIONS)} margin, max loss ${RISK_USD:g}/trade, leverage ≤{MAX_LEVERAGE}x")
-        if NTFY_TOPIC:
-            print("ntfy push:", push("NKs SMC bot test", "Phone push works. Signals will ring like this.", 5, ["rotating_light"]))
+        if NTFY_TOPIC and os.getenv("GITHUB_REF_NAME", "main") == "main":
+            pushed = push("🧪 BOT TEST", "Phone push works. Signals will ring like this.", 5, ["rotating_light"])
+            push_txt = "✅ Working" if pushed else "❌ Failed"
+        else:
+            push_txt = "— main branch only" if NTFY_TOPIC else "⚠️ Not set up"
+        max_sl = SMC_ACTIVE.get("SMC_MAX_SL")
+        ok = tg(f"🧪 <b>BOT TEST — PASSED</b>\n\n"
+                f"🟢 Connection     OK\n"
+                f"🪙 Coins          {len(SYMBOLS)}\n"
+                f"⏱ Timeframe       {TIMEFRAME.upper()}\n"
+                f"📈 Trend           {HTF.upper()}\n"
+                f"🎯 Min Grade      {MIN_SCORE}/6\n\n"
+                f"📐 <b>SETUP</b>\n"
+                f"FVG               {entry_name().replace('FVG ', '')}\n"
+                f"Discount          {'ON' if SMC_REQUIRE_DISCOUNT else 'OFF'}\n"
+                f"Trend Filter      {'ON' if SMC_REQUIRE_TREND else 'OFF'}\n"
+                f"TP                Liquidity\n\n"
+                f"🛡 <b>RISK</b>\n"
+                f"SL                {MIN_SL_PCT:g}%" + (f"–{max_sl:g}%" if max_sl else "+") + "\n"
+                f"Max Loss          ${RISK_USD:g}/trade\n"
+                f"Leverage           ≤{MAX_LEVERAGE}x\n"
+                f"Fees              {FEE_PCT:.2f}%\n\n"
+                f"💰 <b>Margin</b>\n"
+                f"${' / $'.join(f'{m:g}' for m in MARGIN_OPTIONS)}\n\n"
+                f"📱 <b>Phone Push</b>\n{push_txt}")
         sys.exit(0 if ok else 1)
     if args.backtest:
         run_backtest(args.candles)
