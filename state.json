@@ -1,15 +1,9 @@
 {
-    "cancelled":  0,
-    "closed":  [
-
-               ],
-    "last_error_alert":  0,
-    "last_heartbeat":  "2026-10-01",
-    "open":  {
-
-             },
-    "sent":  {
-
-             },
-    "paper_since":  "2026-10-01"
+ "cancelled": 0,
+ "closed": [],
+ "last_error_alert": 0,
+ "last_heartbeat": "2026-10-01",
+ "open": {},
+ "paper_since": "2026-10-01",
+ "sent": {}
 }
