@@ -1,35 +1,9 @@
 {
- "cancelled": 1,
+ "cancelled": 2,
  "closed": [],
  "last_error_alert": 0,
  "last_heartbeat": "2026-10-01",
- "open": {
-  "ZECUSDT|SHORT|smc|1h|1790834400000": {
-   "cancel": 1366.851411677094,
-   "entry": 1423.705,
-   "expires_ct": 1790935199999,
-   "fee_r": 0.05008320642538568,
-   "fut": {
-    "entry": 1423.30130388397,
-    "ratio": 0.9997164467947854,
-    "sl": 1453.1717575743612,
-    "tp": 1375.9997202038749
-   },
-   "kind": "smc",
-   "last_ct": 1790863199999,
-   "opened": 1790848799999,
-   "risk": 28.426794161453017,
-   "side": "SHORT",
-   "sl": 1452.131794161453,
-   "slp": 1.9966772724302448,
-   "source": "spot-vision",
-   "status": "pending",
-   "sym": "ZECUSDT",
-   "tf": "1h",
-   "tp": 1376.39,
-   "usd_r": 0.9983386362151223
-  }
- },
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "ASTERUSDT|SHORT|smc|1h|1790834400000": 1790845313,
