@@ -149,7 +149,10 @@ def main():
         day = st["time"] // 86400000 * 86400000
         st["pit"] = st["sym"] in members.get(day, set())
     # cooldown / breaker / max-per-candle act on the signals the live bot would actually send
-    seq_ok = lambda t: t.get("cool_ok", True) and t.get("breaker_ok", True) and t.get("bar_ok", True) and t.get("dir_ok", True)
+    # sequence limits only where live uses them (active in smc_filters.json), like live_sequence_ok / live_bar_ok
+    on = [f for v, f in (("SMC_COOLDOWN", "cool_ok"), ("SMC_BREAKER", "breaker_ok"),
+                         ("SMC_MAX_PER_BAR", "bar_ok"), ("SMC_MAX_SAME_DIR", "dir_ok")) if v in bot.SMC_ACTIVE]
+    seq_ok = lambda t: all(t.get(f, True) for f in on)
     nofilt = [t for t in setups if t["pit"]]
     today = [dict(t) for t in setups if bot.smc_quality_ok(t)]
     bot.tag_sequence(today, EX)

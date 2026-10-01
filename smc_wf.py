@@ -122,12 +122,18 @@ def build_trades(total):
     return trades
 
 
+SEQ_RULES = (("SMC_COOLDOWN", "cool_ok"), ("SMC_BREAKER", "breaker_ok"),
+             ("SMC_MAX_PER_BAR", "bar_ok"), ("SMC_MAX_SAME_DIR", "dir_ok"))
+
+
 def live_filter(ts, extra=None):
-    """Today's live quality filters (+ an optional extra rule), then cooldown / breaker like live."""
-    sel = [dict(t) for t in ts if bot.smc_quality_ok(t) and (extra is None or extra(t))]
+    """Exactly the live rules: today's quality filters, and cooldown / breaker / per-candle / same-direction
+    limits ONLY if they are active in smc_filters.json (like live_sequence_ok / live_bar_ok).
+    The sequence flags are always computed, so cooldown / breaker can still be tested as extra filters."""
+    sel = [dict(t) for t in ts if bot.smc_quality_ok(t)]
     bot.tag_sequence(sel, EX)
-    return [t for t in sel if t.get("cool_ok", True) and t.get("breaker_ok", True)
-            and t.get("bar_ok", True) and t.get("dir_ok", True)]
+    on = [flag for var, flag in SEQ_RULES if var in bot.SMC_ACTIVE]
+    return [t for t in sel if all(t.get(f, True) for f in on) and (extra is None or extra(t))]
 
 
 def main():
