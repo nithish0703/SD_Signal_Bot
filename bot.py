@@ -1435,7 +1435,9 @@ def scan_smc(st, sym, C, H, src, btc_fn=None):
             continue
         if "SMC_MAX_FILL" in SMC_ACTIVE:                  # validated: only wait N candles for the fill
             x["expires_ct"] = min(x["expires_ct"],
-                                  x["time"] + int(SMC_ACTIVE["SMC_MAX_FILL"]) * (C[-1]["ct"] - C[-1]["t"] + 1))
+                                  # +1: the fill candle may be N candles after the setup candle, matching the
+                                  # backtest rule fill_wait <= N (fill_wait counts from the candle after the signal)
+                                  x["time"] + (int(SMC_ACTIVE["SMC_MAX_FILL"]) + 1) * (C[-1]["ct"] - C[-1]["t"] + 1))
         key = f"{sym}|{x['side']}|smc|{TIMEFRAME}|{x['sweep_t']}"
         if key in st["sent"]:
             continue
