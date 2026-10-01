@@ -49,7 +49,7 @@ COMBOS = [
      and (t["fill_wait"] or 0) <= 3),
     ("C3 sweep ≤1 ATR only", lambda t: t["sweep_depth"] <= 1.0),
 ]
-SAME_AS_HYP = {"SMC_MSS_FAST4", "SMC_MSS_CLOSE", "SMC_MSS_MARGIN", "SMC_MSS_VOL", "SMC_TREND", "SMC_MIN_RR", "SMC_SWEEP_REJECT"}
+SAME_AS_HYP = {"SMC_MSS_FAST4", "SMC_MSS_CLOSE", "SMC_MSS_MARGIN", "SMC_MSS_VOL", "SMC_TREND", "SMC_MIN_RR", "SMC_SWEEP_REJECT", "SMC_MAX_DEPTH"}
 CANDS = HYP + COMBOS + [(lbl, (lambda f, v: (lambda t: f(t, v)))(fn, val))
                for lbl, var, val, fn in bot.SMC_QUALITY if var not in bot.SMC_ACTIVE and var not in SAME_AS_HYP]
 
