@@ -216,7 +216,9 @@ def fetch_futures_1h(fut, hours):
     while m < this_month:
         urls.append(FUT_KLINE_URL.format(period="monthly", s=fut, d=m.strftime("%Y-%m")))
         m = datetime(m.year + (m.month == 12), m.month % 12 + 1, 1, tzinfo=timezone.utc)
-    d = max(this_month, start).date()
+    # daily files for the last ~45 days too: last month's monthly file is only published a few days
+    # into the new month, so without these the whole previous month would be missing (duplicates are merged)
+    d = max(this_month - timedelta(days=45), start).date()
     while d < now.date():
         urls.append(FUT_KLINE_URL.format(period="daily", s=fut, d=d.isoformat()))
         d += timedelta(days=1)
