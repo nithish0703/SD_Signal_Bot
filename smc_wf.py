@@ -43,8 +43,14 @@ HYP = [
     ("H5 target ≥1.5R", lambda t: t["tgt_r"] >= 1.5),
     ("H5 target ≥2R", lambda t: t["tgt_r"] >= 2.0),
 ]
+COMBOS = [
+    ("C1 sweep ≤1 ATR + sweep candle reclaimed", lambda t: t["sweep_depth"] <= 1.0 and t["sweep_rej"]),
+    ("C2 C1 + fresh FVG (fill ≤3 candles)", lambda t: t["sweep_depth"] <= 1.0 and t["sweep_rej"]
+     and (t["fill_wait"] or 0) <= 3),
+    ("C3 sweep ≤1 ATR only", lambda t: t["sweep_depth"] <= 1.0),
+]
 SAME_AS_HYP = {"SMC_MSS_FAST4", "SMC_MSS_CLOSE", "SMC_MSS_MARGIN", "SMC_MSS_VOL", "SMC_TREND", "SMC_MIN_RR", "SMC_SWEEP_REJECT"}
-CANDS = HYP + [(lbl, (lambda f, v: (lambda t: f(t, v)))(fn, val))
+CANDS = HYP + COMBOS + [(lbl, (lambda f, v: (lambda t: f(t, v)))(fn, val))
                for lbl, var, val, fn in bot.SMC_QUALITY if var not in bot.SMC_ACTIVE and var not in SAME_AS_HYP]
 
 BUCKETS = [
@@ -223,6 +229,29 @@ def main():
     out.append(f"\nRe-selecting filters every fold on train data only: {resel_n} test trades, total {resel_tot:+.1f}R "
                f"vs live {base_tot:+.1f}R.  " + " | ".join(resel_cells))
 
+    # ---------------- D. combo check: each year and each quarter (pass rule fixed before the run)
+    out.append("\n### Combo check: year by year and quarter by quarter\n")
+    out.append("Pass = better avg net R than live in BOTH years, in ≥6 of 8 quarters, total R higher, ≥50% of trades kept.\n")
+    out.append("| Rule | Year 1 n / total | Year 2 n / total | Quarters better | All n / total | Pass? |\n|---|---|---|---|---|---|")
+    yr = [(start, mid), (mid, end)]
+    qs = [(start + i * (end - start) / 8, start + (i + 1) * (end - start) / 8) for i in range(8)]
+    b_y = [agg(live_filter(span(a, b))) for a, b in yr]
+    b_q = [agg(live_filter(span(a, b))) for a, b in qs]
+    out.append(f"| Live rules today | {b_y[0][0]} / {b_y[0][2]:+.1f}R | {b_y[1][0]} / {b_y[1][2]:+.1f}R | – | "
+               f"{b_y[0][0] + b_y[1][0]} / {b_y[0][2] + b_y[1][2]:+.1f}R | – |")
+    tg_combo = [f"Live rules: year 1 {b_y[0][2]:+.0f}R ({b_y[0][0]}) · year 2 {b_y[1][2]:+.0f}R ({b_y[1][0]})"]
+    for lbl, fn in COMBOS:
+        c_y = [agg(live_filter(span(a, b), fn)) for a, b in yr]
+        c_q = [agg(live_filter(span(a, b), fn)) for a, b in qs]
+        qb = sum(1 for c, b in zip(c_q, b_q) if c[0] > 0 and c[1] > b[1])
+        both = all(c[0] > 0 and c[1] > b[1] for c, b in zip(c_y, b_y))
+        n_all, t_all = c_y[0][0] + c_y[1][0], c_y[0][2] + c_y[1][2]
+        ok = both and qb >= 6 and t_all > b_y[0][2] + b_y[1][2] and n_all >= 0.5 * (b_y[0][0] + b_y[1][0])
+        out.append(f"| {lbl} | {c_y[0][0]} / {c_y[0][2]:+.1f}R | {c_y[1][0]} / {c_y[1][2]:+.1f}R | {qb}/8 | "
+                   f"{n_all} / {t_all:+.1f}R | {'✅' if ok else '❌'} |")
+        tg_combo.append(f"{'✅' if ok else '❌'} {lbl}: year 1 {c_y[0][2]:+.0f}R ({c_y[0][0]}) · year 2 {c_y[1][2]:+.0f}R "
+                        f"({c_y[1][0]}) · quarters better {qb}/8")
+
     # ---------------- Telegram summary
     tg.append(f"Out-of-sample test months ({len(folds)} folds × {TEST_M}m): live rules {base_n} trades, {base_tot:+.0f}R")
     if passed:
@@ -233,6 +262,7 @@ def main():
         tg.append("❌ No extra filter improved the out-of-sample result in ≥3 of 4 folds.")
     tg.append(f"Re-tuning filters each fold: {resel_tot:+.0f}R vs keeping today's {base_tot:+.0f}R → "
               + ("tuning helped" if resel_tot > base_tot else "tuning did NOT help"))
+    tg.append("<b>Combo check</b> (pass = better in both years + ≥6/8 quarters)\n" + "\n".join(tg_combo))
     if flags:
         tg.append("Diagnostic (same in both halves, ≥15 trades each):\n" + "\n".join("• " + f for f in flags[:8]))
     else:
