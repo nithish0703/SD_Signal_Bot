@@ -2035,6 +2035,7 @@ def _smc_long(C, H, entry_mode, pending=False):
         q["below_mo"] = mi is None or entry < o[mi]                      # long below NY midnight open = discount of the day
         q["ote_fvg"] = zb <= ote_hi and zt >= ote_lo                     # FVG sits inside the OTE zone
         q["has_ob"] = ob is not None
+        q["ob_fvg"] = ob is not None and l[ob] <= zt and h[ob] >= zb       # order block overlaps the FVG (confluence)
         q["weekend"] = datetime.fromtimestamp(C[sg]["ct"] / 1000, timezone.utc).weekday() >= 5
         win = [v2 for v2 in atrp[max(0, sg - 720):sg + 1] if v2 is not None]   # ~30 days of 1h
         q["atr_pct"] = (sum(1 for v2 in win if v2 <= atrp[sg]) / len(win) * 100) if win and atrp[sg] else 50.0
