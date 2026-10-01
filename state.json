@@ -1,48 +1,19 @@
 {
- "cancelled": 2,
- "closed": [
-  {
-   "closed": 1790782794,
-   "net": -1.05,
-   "r": -1.0,
-   "side": "LONG",
-   "simple": -1.05,
-   "strategy": "smc",
-   "sym": "FILUSDT",
-   "tf": "1h",
-   "usd": -1.05
-  },
-  {
-   "closed": 1790782795,
-   "net": -1.095,
-   "r": -1.0,
-   "side": "LONG",
-   "simple": -1.095,
-   "strategy": "smc",
-   "sym": "LTCUSDT",
-   "tf": "1h",
-   "usd": -1.04
-  },
-  {
-   "closed": 1790794939,
-   "net": -1.044,
-   "r": -1.0,
-   "side": "LONG",
-   "simple": -1.044,
-   "strategy": "smc",
-   "sym": "APTUSDT",
-   "tf": "1h",
-   "usd": -0.96
-  }
- ],
- "last_error_alert": 0,
- "last_heartbeat": "2026-10-01",
- "open": {},
- "sent": {
-  "APTUSDT|LONG|smc|1h|1790748000000": 1790773337,
-  "FILUSDT|LONG|smc|1h|1790748000000": 1790773330,
-  "LTCUSDT|LONG|smc|1h|1790751600000": 1790769704,
-  "ONDOUSDT|LONG|smc|1h|1790755200000": 1790773302,
-  "QNTUSDT|LONG|smc|1h|1790643600000": 1790672472
- }
+    "cancelled":  0,
+    "closed":  [
+
+               ],
+    "last_error_alert":  0,
+    "last_heartbeat":  "2026-10-01",
+    "open":  {
+
+             },
+    "sent":  {
+                 "APTUSDT|LONG|smc|1h|1790748000000":  1790773337,
+                 "FILUSDT|LONG|smc|1h|1790748000000":  1790773330,
+                 "LTCUSDT|LONG|smc|1h|1790751600000":  1790769704,
+                 "ONDOUSDT|LONG|smc|1h|1790755200000":  1790773302,
+                 "QNTUSDT|LONG|smc|1h|1790643600000":  1790672472
+             },
+    "paper_since":  "2026-10-01"
 }
