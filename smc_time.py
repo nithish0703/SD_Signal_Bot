@@ -1,14 +1,16 @@
-"""Time-filter test (report only, changes nothing live): what happens if signals may come at ANY hour?
+"""Session diagnostic (report only, changes nothing live): which TIME WINDOW suits the frozen A+B+C setup best?
 
-Base = today's live rules (A+B+C: 8 filters from smc_filters.json). Variants remove the two time filters:
-  1. Live A+B+C (killzone + London/NY)          2. without killzone (sweep at any hour)
-  3. without London/NY session (signal any hour) 4. without both = signals 24/7
+A+B+C stays exactly as live (all 6 non-time filters from smc_filters.json untouched). Only the time rule changes:
+  baseline  = live killzone + London/NY filters (as on main today)
+  others    = both live time filters removed, then only signals whose SIGNAL candle (UTC hour) is inside the
+              chosen session(s) are kept -- the window is applied before the live rules, like a live time filter.
+Sessions (signal hour, UTC -> IST):
+  Asia 00-08 (5:30 AM-1:30 PM) | London 08-13 (1:30-6:30 PM) | Overlap 13-16 (6:30-9:30 PM)
+  US 16-21 (9:30 PM-2:30 AM) | Late US 21-24 (2:30-5:30 AM, only inside "All sessions")
 Same setups, exits and fees as the live bot; 50 futures coins, 1h, last 24 months, $1 risk -> R = $.
-Per variant: trades, win, avg R, total R, max drawdown, loss streak, year 1 / year 2, profitable months,
-walk-forward test months (same 4 folds as smc_wf), and for variant 4 the result by IST time of the signal.
 
-Pass rule for adding more hours (fixed before running): versus live A+B+C, a variant must have
-higher avg R in BOTH years, max drawdown not larger, and higher total R.
+Pass rule (fixed before running): versus the baseline, a window must have higher avg R in BOTH years,
+max drawdown not larger, and higher total R. Otherwise the live killzone stays.
 """
 import os
 import sys
@@ -20,15 +22,27 @@ import bot  # noqa: E402
 import smc_wf as wf  # noqa: E402
 from smc_expd import curve  # noqa: E402
 
-VARIANTS = [("1 Live A+B+C (killzone + London/NY)", ()),
-            ("2 Without killzone", ("SMC_KILLZONE",)),
-            ("3 Without London/NY session", ("SMC_LDN_NY",)),
-            ("4 Without both (24/7)", ("SMC_KILLZONE", "SMC_LDN_NY"))]
-IST_BUCKETS = [("Asia 5:30 AM–1:30 PM IST (00–08 UTC)", 0, 8),
-               ("London 1:30–6:30 PM IST (08–13 UTC)", 8, 13),
-               ("London–US overlap 6:30–9:30 PM IST (13–16 UTC)", 13, 16),
-               ("US 9:30 PM–2:30 AM IST (16–21 UTC)", 16, 21),
-               ("Late US 2:30–5:30 AM IST (21–24 UTC)", 21, 24)]
+TIME_KEYS = ("SMC_KILLZONE", "SMC_LDN_NY")
+S = {"Asia": (0, 8), "London": (8, 13), "Overlap": (13, 16), "US": (16, 21), "Late": (21, 24)}
+VARIANTS = [("1 A+B+C baseline (live killzone)", None),
+            ("2 Asia only", ("Asia",)),
+            ("3 London only", ("London",)),
+            ("4 London/NY overlap only", ("Overlap",)),
+            ("5 US only", ("US",)),
+            ("6 London + overlap", ("London", "Overlap")),
+            ("7 London + US", ("London", "US")),
+            ("8 All sessions (24/7)", tuple(S))]
+
+
+def in_window(t, sess):
+    h = t.get("sig_hour", -1)
+    return any(S[s][0] <= h < S[s][1] for s in sess)
+
+
+def pf(ts):
+    rs = [wf.net(t) for t in ts]
+    loss = -sum(r for r in rs if r < 0)
+    return sum(r for r in rs if r > 0) / loss if loss else float("inf")
 
 
 def main():
@@ -44,52 +58,52 @@ def main():
     while f + 0.5 * wf.TEST_M * wf.MONTH_MS <= end:
         folds.append((f, min(end, f + wf.TEST_M * wf.MONTH_MS)))
         f += wf.TEST_M * wf.MONTH_MS
-    span = lambda a, b: [t for t in trades if a <= t["time"] < b]
 
     saved = dict(bot.SMC_ACTIVE)
     res = {}
-    for name, drop in VARIANTS:
+    try:
+        for name, sess in VARIANTS:
+            bot.SMC_ACTIVE.clear()
+            bot.SMC_ACTIVE.update(saved if sess is None else {k: v for k, v in saved.items() if k not in TIME_KEYS})
+            pool = trades if sess is None else [t for t in trades if in_window(t, sess)]
+            allv = wf.live_filter(pool)
+            n, avg, tot, win = wf.agg(allv)
+            dd, ls = curve(allv)
+            yrs = [wf.agg([t for t in allv if (t["time"] < mid) == first]) for first in (True, False)]
+            months = defaultdict(float)
+            for t in allv:
+                months[time.strftime("%Y-%m", time.gmtime(t["time"] / 1000))] += wf.net(t)
+            oos = [wf.agg(wf.live_filter([t for t in pool if a <= t["time"] < b])) for a, b in folds]
+            res[name] = dict(n=n, avg=avg, tot=tot, win=win, dd=dd, ls=ls, pf=pf(allv), yrs=yrs, months=months,
+                             oos=oos)
+    finally:
         bot.SMC_ACTIVE.clear()
-        bot.SMC_ACTIVE.update({k: v for k, v in saved.items() if k not in drop})
-        allv = wf.live_filter(trades)
-        n, avg, tot, win = wf.agg(allv)
-        dd, ls = curve(allv)
-        yrs = [wf.agg([t for t in allv if (t["time"] < mid) == first]) for first in (True, False)]
-        months = defaultdict(float)
-        for t in allv:
-            months[time.strftime("%Y-%m", time.gmtime(t["time"] / 1000))] += wf.net(t)
-        oos = [wf.agg(wf.live_filter(span(a, b))) for a, b in folds]
-        hours = defaultdict(list)
-        for t in allv:
-            h = t.get("sig_hour", 12)
-            hours[next(lbl for lbl, a, b in IST_BUCKETS if a <= h < b)].append(t)
-        res[name] = dict(n=n, avg=avg, tot=tot, win=win, dd=dd, ls=ls, yrs=yrs, months=months, oos=oos, hours=hours)
-    bot.SMC_ACTIVE.clear()
-    bot.SMC_ACTIVE.update(saved)
+        bot.SMC_ACTIVE.update(saved)
 
     base = res[VARIANTS[0][0]]
-    out = [f"## Time-filter test ({len(bot.SYMBOLS)} futures coins, 1h, {wf.MONTHS} months, $1 risk → R = $)\n",
-           "| Variant | Trades | Win | Avg R | Total R | Max DD | Loss streak | Year 1 | Year 2 | Profitable months | WF test months | More hours OK? |",
-           "|---|---|---|---|---|---|---|---|---|---|---|---|"]
-    tg = [f"🕒 <b>Time-filter test</b> ({len(bot.SYMBOLS)} coins, {wf.MONTHS} months, $1 risk)"]
+    out = [f"## Session diagnostic — A+B+C frozen ({len(bot.SYMBOLS)} futures coins, 1h, {wf.MONTHS} months, "
+           "$1 risk → R = $)\n",
+           "| Variant | Trades | Win | Avg R (R/trade) | Total R | R/month | Max DD | Profit factor | Loss streak | "
+           f"Year 1 | Year 2 | Profitable months (of months with trades) | WF test ({len(folds)} folds) | WF folds + | Pass? |",
+           "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    tg = [f"🕒 <b>Session diagnostic</b> — A+B+C frozen ({len(bot.SYMBOLS)} coins, {wf.MONTHS} months, $1 risk)"]
     for name, _ in VARIANTS:
         v = res[name]
         pm = f"{sum(1 for x in v['months'].values() if x > 0)}/{len(v['months'])}"
         oos = sum(x[2] for x in v["oos"])
+        fp = f"{sum(1 for x in v['oos'] if x[2] > 0)}/{len(v['oos'])}"
         ok = "–" if v is base else ("✅" if all(v["yrs"][i][0] > 0 and v["yrs"][i][1] > base["yrs"][i][1] for i in (0, 1))
                                     and v["dd"] >= base["dd"] and v["tot"] > base["tot"] else "❌")
-        out.append(f"| {name} | {v['n']} | {v['win']:.0f}% | {v['avg']:+.2f} | {v['tot']:+.1f} | {v['dd']:.1f} | {v['ls']} | "
-                   f"{v['yrs'][0][0]} / {v['yrs'][0][2]:+.1f} | {v['yrs'][1][0]} / {v['yrs'][1][2]:+.1f} | {pm} | {oos:+.1f} | {ok} |")
-        tg.append(f"{'' if ok == '–' else ok + ' '}{name}: {v['n']} trades, win {v['win']:.0f}%, {v['avg']:+.2f}R, total "
-                  f"{v['tot']:+.0f}R, DD {v['dd']:.0f}R, streak {v['ls']}, Y1 {v['yrs'][0][2]:+.0f} · Y2 {v['yrs'][1][2]:+.0f}")
-    full = res[VARIANTS[-1][0]]
-    out.append("\n### 24/7 variant: result by IST time of the signal\n")
-    out.append("| IST window | Trades | Win | Avg R | Total R |\n|---|---|---|---|---|")
-    tg.append("24/7 by IST time of signal:")
-    for lbl, _, _ in IST_BUCKETS:
-        n, avg, tot, win = wf.agg(full["hours"].get(lbl, []))
-        out.append(f"| {lbl} | {n} | {win:.0f}% | {avg:+.2f} | {tot:+.1f} |")
-        tg.append(f"• {lbl}: {n} trades, {avg:+.2f}R, total {tot:+.0f}R")
+        pft = "–" if not v["n"] else ("∞" if v["pf"] == float("inf") else f"{v['pf']:.2f}")
+        out.append(f"| {name} | {v['n']} | {v['win']:.0f}% | {v['avg']:+.2f} | {v['tot']:+.1f} | "
+                   f"{v['tot'] / wf.MONTHS:+.2f} | {v['dd']:.1f} | {pft} | {v['ls']} | "
+                   f"{v['yrs'][0][0]} / {v['yrs'][0][2]:+.1f} | {v['yrs'][1][0]} / {v['yrs'][1][2]:+.1f} | {pm} | "
+                   f"{oos:+.1f} | {fp} | {ok} |")
+        tg.append(f"{'' if ok == '–' else ok + ' '}{name}: {v['n']} trades, win {v['win']:.0f}%, {v['avg']:+.2f}R, "
+                  f"total {v['tot']:+.0f}R ({v['tot'] / wf.MONTHS:+.1f}/mo), PF {pft}, DD {v['dd']:.0f}R, "
+                  f"streak {v['ls']}, Y1 {v['yrs'][0][2]:+.0f} · Y2 {v['yrs'][1][2]:+.0f}, months+ {pm}, WF {fp}")
+    out.append("\nSessions by signal hour: Asia 00–08 UTC (5:30 AM–1:30 PM IST) · London 08–13 (1:30–6:30 PM) · "
+               "Overlap 13–16 (6:30–9:30 PM) · US 16–21 (9:30 PM–2:30 AM) · All = 24 h incl. late US 21–24.")
     tg.append(f"Report only, nothing changed live. Not financial advice. {(time.time() - t0) / 60:.0f} min. "
               "Full table: Actions → run summary.")
     report = "\n".join(out)
