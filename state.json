@@ -1,35 +1,9 @@
 {
- "cancelled": 2,
+ "cancelled": 3,
  "closed": [],
  "last_error_alert": 0,
  "last_heartbeat": "2026-10-02",
- "open": {
-  "TAOUSDT|SHORT|smc|1h|1790946000000": {
-   "cancel": 298.90552471706025,
-   "entry": 310.95,
-   "expires_ct": 1790978399999,
-   "fee_r": 0.05163363163531773,
-   "fut": {
-    "entry": 310.7262217860648,
-    "ratio": 0.9992803402028133,
-    "sl": 317.06086959068017,
-    "tp": 297.285901210337
-   },
-   "kind": "smc",
-   "last_ct": 1790963999999,
-   "opened": 1790963999999,
-   "risk": 6.0222376414698715,
-   "side": "SHORT",
-   "sl": 316.97223764146986,
-   "slp": 1.9367221873194636,
-   "source": "spot-vision",
-   "status": "pending",
-   "sym": "TAOUSDT",
-   "tf": "1h",
-   "tp": 297.5,
-   "usd_r": 0.9683610936597318
-  }
- },
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "ASTERUSDT|SHORT|smc|1h|1790834400000": 1790845313,
