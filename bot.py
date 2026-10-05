@@ -400,6 +400,12 @@ if os.getenv("COIN_SELECT", "").strip().lower() in ("0", "false", "no"):
 elif os.getenv("COIN_SELECT", "").strip().lower() in ("1", "true", "yes"):
     COIN_SELECT = True             # experimental 8-metric selection (not validated)
 COIN_POOL = _env_num("COIN_POOL", COIN_POOL, int)
+# Coin list rule when COIN_SELECT is off. "vol30" = top N by 30-day MEDIAN daily volume (from the top 150 by 24h
+# volume), rebuilt once a day: same edge as 24h volume in the 12-month universe study but a far more stable list
+# (0.5 vs 4.5 coins changed per day) and a slightly lower drawdown. "vol24" = plain top N by 24h volume (old rule).
+COIN_RANK = os.getenv("COIN_RANK", "").strip().lower() or "vol30"
+COIN_RANK_POOL = 150
+COIN_RANK_DAYS = 30
 DATA_VISION = "https://data.binance.vision/data/futures/um/daily"
 
 
@@ -589,11 +595,50 @@ def build_universe(n):
     return chosen, {"pool": len(pool), "measured": len(rows), "dropped": dropped, "table": kept[:n]}
 
 
+def vol30_symbols(n):
+    """Top n futures coins by median daily $ volume of the last COIN_RANK_DAYS complete UTC days,
+    picked from the top COIN_RANK_POOL by 24h volume. Uses only finished days (no look-ahead)."""
+    from concurrent.futures import ThreadPoolExecutor
+    pool, src = volume_top_symbols(max(n, COIN_RANK_POOL))
+    if "NOT futures-checked" in src or src == "fallback list":
+        raise RuntimeError(f"coin pool not futures-checked ({src})")    # never cache such a list for a day
+    today = int(time.time() // 86400)
+
+    def med(sym):
+        try:
+            C, _ = fetch_klines(sym, "1h", 1000)
+        except Exception:
+            return "failed"
+        vol, cnt = {}, {}
+        for x in C:
+            d = x["t"] // 86400000
+            vol[d] = vol.get(d, 0.0) + x["v"] * x["c"]
+            cnt[d] = cnt.get(d, 0) + 1
+        days = sorted(d for d in vol if cnt[d] == 24 and d < today)[-COIN_RANK_DAYS:]
+        if len(days) < COIN_RANK_DAYS:
+            return None                                   # too new / gaps: not enough complete days
+        v = sorted(vol[d] for d in days)
+        return (v[len(v) // 2 - 1] + v[len(v) // 2]) / 2 if len(v) % 2 == 0 else v[len(v) // 2]
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        meds = list(ex.map(med, pool))
+    failed = sum(1 for m in meds if m == "failed")
+    fetched = len(pool) - failed
+    if failed > 0.1 * len(pool):                          # many downloads failed: do not cache a partial list
+        raise RuntimeError(f"{failed}/{len(pool)} coin downloads failed")
+    rows = sorted(((m, s) for m, s in zip(meds, pool) if m and m != "failed"), reverse=True)
+    syms = [s for _, s in rows[:n]]
+    if len(syms) < min(n, 10):
+        raise RuntimeError(f"only {len(syms)} coins have {COIN_RANK_DAYS} days of volume")
+    return syms, f"{src}, {fetched}/{len(pool)} measured"
+
+
 def load_universe(n):
     try:
         with open(UNIVERSE_FILE) as f:
             u = json.load(f)
-        if u.get("n") == n and time.time() - u.get("ts", 0) < 24 * 3600 and u.get("symbols"):
+        if (u.get("n") == n and time.time() - u.get("ts", 0) < 24 * 3600 and u.get("symbols")
+                and u.get("rule") in (None, "score")):
             return u
     except Exception:
         pass
@@ -637,6 +682,30 @@ def resolve_symbols(allow_build=True):
                 return
             except Exception as e:
                 print("Coin selection failed, using volume ranking:", e)
+    if COIN_RANK == "vol30":
+        day = datetime.fromtimestamp(time.time(), timezone.utc).strftime("%Y-%m-%d")   # same clock as vol30_symbols
+        try:
+            with open(UNIVERSE_FILE) as f:
+                u = json.load(f)
+        except Exception:
+            u = {}
+        if u.get("rule") == "vol30" and u.get("n") == TOP_N and u.get("day") == day and u.get("symbols"):
+            SYMBOLS = u["symbols"]
+            FUTURES_NAME.update(u.get("futures_names", {}))
+            print(f"Top {len(SYMBOLS)} by {COIN_RANK_DAYS}-day median volume (list of {day}): {', '.join(SYMBOLS)}")
+            return
+        if allow_build:
+            try:
+                syms, src = vol30_symbols(TOP_N)
+                SYMBOLS = syms
+                with open(UNIVERSE_FILE, "w") as f:
+                    json.dump({"rule": "vol30", "n": TOP_N, "day": day, "ts": int(time.time()), "source": src,
+                               "symbols": syms, "futures_names": {k: v for k, v in FUTURES_NAME.items() if k in syms}},
+                              f, indent=1)
+                print(f"Top {len(syms)} by {COIN_RANK_DAYS}-day median volume, rebuilt {day} ({src}): {', '.join(syms)}")
+                return
+            except Exception as e:
+                print("30-day volume list failed, using 24h volume ranking:", e)
     SYMBOLS, src = volume_top_symbols(TOP_N)
     print(f"Top {len(SYMBOLS)} futures coins by 24h volume ({src}): {', '.join(SYMBOLS)}")
 
