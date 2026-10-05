@@ -1,37 +1,23 @@
 {
- "cancelled": 3,
+ "cancel_log": [
+  {
+   "at": 1791230553,
+   "cancel_ct": 1791230399999,
+   "entry": 0.57585,
+   "side": "SHORT",
+   "signal_ct": 1791212399999,
+   "sl": 0.591540762193319,
+   "sweep_t": 1791187200000,
+   "sym": "WLDUSDT",
+   "tp": 0.5538,
+   "why": "expired"
+  }
+ ],
+ "cancelled": 4,
  "closed": [],
  "last_error_alert": 0,
  "last_heartbeat": "2026-10-05",
- "open": {
-  "WLDUSDT|SHORT|smc|1h|1791187200000": {
-   "cancel": 0.544468475613362,
-   "entry": 0.57585,
-   "expires_ct": 1791226799999,
-   "fee_r": 0.03669993802118755,
-   "fut": {
-    "entry": 0.5756524528301887,
-    "ratio": 0.9996569468267582,
-    "sl": 0.5919509180959076,
-    "tp": 0.5536100171526587
-   },
-   "kind": "smc",
-   "last_ct": 1791226799999,
-   "opened": 1791212399999,
-   "risk": 0.015690762193318997,
-   "side": "SHORT",
-   "sl": 0.591540762193319,
-   "sl0": 0.591540762193319,
-   "slp": 2.724800241958669,
-   "source": "spot-vision",
-   "status": "pending",
-   "sweep_t": 1791187200000,
-   "sym": "WLDUSDT",
-   "tf": "1h",
-   "tp": 0.5538,
-   "usd_r": 0.9536800846855342
-  }
- },
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "ASTERUSDT|SHORT|smc|1h|1790834400000": 1790845313,
