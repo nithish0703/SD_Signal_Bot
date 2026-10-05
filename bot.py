@@ -2283,9 +2283,17 @@ def smc_quality_ok(x, active=None):
     return True
 
 
+def _quality_label(lbl, default, val):
+    """Show the value actually in use: 'Fill within 12 candles' with value 3 -> 'Fill within 3 candles'."""
+    fmt = lambda v: f"{float(v):g}"
+    if float(val) != float(default) and fmt(default) in lbl:
+        return lbl.replace(fmt(default), fmt(val), 1)
+    return lbl
+
+
 def smc_quality_txt(active=None):
     active = SMC_ACTIVE if active is None else active
-    return ", ".join(lbl for lbl, var, _, _ in SMC_QUALITY if var in active) or "none"
+    return ", ".join(_quality_label(lbl, d, active[var]) for lbl, var, d, _ in SMC_QUALITY if var in active) or "none"
 
 
 def _smc(fn):
