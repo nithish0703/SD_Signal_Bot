@@ -1241,6 +1241,7 @@ def open_smc_trade(st, key, sym, s, source, candles):
         "entry": s["entry"], "sl": s["sl"], "tp": s["tp"], "cancel": s["cancel"], "expires_ct": s["expires_ct"],
         "risk": abs(s["entry"] - s["sl"]), "slp": sl_pct(s), "fee_r": fee_r(s),
         "usd_r": sizing(s, s["side"])["loss"], "opened": s["time"], "last_ct": candles[s["sig"]]["ct"],
+        "sl0": s["sl"], "sweep_t": s.get("sweep_t"),         # log only: original SL, sweep candle time
     }
 
 
@@ -1258,6 +1259,7 @@ def update_smc(tr, candles):
                 return ev + [("cancelled", "expired, never filled")]
             if lo <= E:
                 tr["status"] = "filled"
+                tr["fill_ct"], tr["mfe"], tr["mae"] = x["ct"], 0.0, max(0.0, (E - lo) / tr["risk"])
                 ev.append(("filled", tr["entry"]))
                 if lo <= SL:                                  # stopped out in the fill candle
                     return ev + [("closed", tr["sl"], -1.0)]
@@ -1265,6 +1267,8 @@ def update_smc(tr, candles):
             if hi >= CX:
                 return ev + [("cancelled", "price ran away before filling")]
             continue
+        tr["mfe"] = max(tr.get("mfe", 0.0), (hi - E) / tr["risk"])       # log only: best / worst move in R
+        tr["mae"] = max(tr.get("mae", 0.0), (E - lo) / tr["risk"])
         if lo <= SL:
             return ev + [("closed", _px(min(op, SL), side), (min(op, SL) - E) / tr["risk"])]
         if hi >= TP:
@@ -1313,6 +1317,11 @@ def manage_smc(st, key, tr, candles):
                    f"❌ CANCELLED — {sym}", 4, ["x"])
             st.setdefault("cancelled", 0)
             st["cancelled"] += 1
+            st.setdefault("cancel_log", []).append({                # log only (live vs backtest check)
+                "sym": sym, "side": side, "signal_ct": tr.get("opened"), "sweep_t": tr.get("sweep_t"),
+                "entry": tr["entry"], "sl": tr.get("sl0", tr["sl"]), "tp": tr["tp"],
+                "why": "ran away" if ran else "expired", "cancel_ct": tr.get("last_ct"), "at": int(time.time())})
+            st["cancel_log"] = st["cancel_log"][-300:]
             del st["open"][key]
             return
         elif ev[0] == "closed":
@@ -1342,7 +1351,13 @@ def manage_smc(st, key, tr, candles):
                    f"{icon} {title} — {sym}" + ("" if title == "BREAKEVEN" else f" {usd_txt(usd)}"), 3, [tag])
             st["closed"].append({"sym": tr["sym"], "side": tr["side"], "tf": tr["tf"], "strategy": "smc",
                                  "r": round(r, 3), "net": round(net, 3), "simple": round(net, 3),
-                                 "usd": round(usd, 2), "closed": int(time.time())})
+                                 "usd": round(usd, 2), "closed": int(time.time()),
+                                 # log only (live vs backtest check)
+                                 "signal_ct": tr.get("opened"), "sweep_t": tr.get("sweep_t"),
+                                 "fill_ct": tr.get("fill_ct"), "exit_ct": tr.get("last_ct"),
+                                 "entry": tr["entry"], "sl": tr.get("sl0", tr["sl"]), "tp": tr["tp"],
+                                 "exit": ev[1], "why": title, "slp": round(tr.get("slp", 0), 3),
+                                 "mfe": round(tr.get("mfe", 0.0), 3), "mae": round(tr.get("mae", 0.0), 3)})
             del st["open"][key]
             return
 
