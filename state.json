@@ -1,12 +1,13 @@
 {
- "cancelled": 2,
+ "cancelled": 3,
  "closed": [],
  "last_error_alert": 0,
- "last_heartbeat": "2026-10-02",
+ "last_heartbeat": "2026-10-05",
  "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "ASTERUSDT|SHORT|smc|1h|1790834400000": 1790845313,
+  "TAOUSDT|SHORT|smc|1h|1790946000000": 1790964115,
   "ZECUSDT|SHORT|smc|1h|1790834400000": 1790848875
  }
 }
