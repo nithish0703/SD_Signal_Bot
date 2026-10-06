@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing), smc_regime = regime attribution of live trades (report only), smc_universe = coin-list rules A/B/C/D compared (report only)"
+        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing), smc_regime = regime attribution of live trades (report only), smc_universe = coin-list rules A/B/C/D compared (report only), account_pit = account on futures data with the coin list rebuilt daily (no survivorship bias)"
         type: choice
-        options: [scan, test, backtest, account, amd, smc, smc_futures, account_futures, smc_regime, smc_universe]
+        options: [scan, test, backtest, account, amd, smc, smc_futures, account_futures, smc_regime, smc_universe, account_pit]
         default: scan
       balance:
         description: "account mode: starting balance ($)"
@@ -144,9 +144,10 @@ jobs:
           elif [ "$MODE" = "smc_regime" ]; then python smc_regime.py
           elif [ "$MODE" = "smc_universe" ]; then python smc_universe.py
           elif [ "$MODE" = "smc_futures" ]; then python bot.py --smc --data futures --candles 6000 --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
-          elif [ "$MODE" = "account" ] || [ "$MODE" = "account_futures" ]; then
-            DATA=spot; [ "$MODE" = "account_futures" ] && DATA=futures
-            python bot.py --account --data "$DATA" \
+          elif [ "$MODE" = "account" ] || [ "$MODE" = "account_futures" ] || [ "$MODE" = "account_pit" ]; then
+            DATA=spot; [ "$MODE" != "account" ] && DATA=futures
+            PIT=""; [ "$MODE" = "account_pit" ] && PIT="--pit"
+            python bot.py --account --data "$DATA" $PIT \
               --balance "${{ github.event.inputs.balance }}" --margin "${{ github.event.inputs.margin }}" \
               --leverage "${{ github.event.inputs.leverage }}" --days "${{ github.event.inputs.days }}" \
               --sizing "${{ github.event.inputs.sizing }}" --risk "${{ github.event.inputs.risk }}" \
