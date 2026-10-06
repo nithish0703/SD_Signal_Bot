@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing), smc_regime = regime attribution of live trades (report only), smc_universe = coin-list rules A/B/C/D compared (report only), account_pit = account on futures data with the coin list rebuilt daily (no survivorship bias)"
+        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing), smc_regime = regime attribution of live trades (report only), smc_universe = coin-list rules A/B/C/D compared (report only), account_pit = account on futures data with the coin list rebuilt daily (no survivorship bias), smc_mtf = LTF/HTF timeframe combinations (report only)"
         type: choice
-        options: [scan, test, backtest, account, amd, smc, smc_futures, account_futures, smc_regime, smc_universe, account_pit]
+        options: [scan, test, backtest, account, amd, smc, smc_futures, account_futures, smc_regime, smc_universe, account_pit, smc_mtf]
         default: scan
       balance:
         description: "account mode: starting balance ($)"
@@ -143,6 +143,7 @@ jobs:
           elif [ "$MODE" = "smc" ]; then python bot.py --smc --candles 6000 --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
           elif [ "$MODE" = "smc_regime" ]; then python smc_regime.py
           elif [ "$MODE" = "smc_universe" ]; then python smc_universe.py
+          elif [ "$MODE" = "smc_mtf" ]; then python smc_mtf.py
           elif [ "$MODE" = "smc_futures" ]; then python bot.py --smc --data futures --candles 6000 --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
           elif [ "$MODE" = "account" ] || [ "$MODE" = "account_futures" ] || [ "$MODE" = "account_pit" ]; then
             DATA=spot; [ "$MODE" != "account" ] && DATA=futures
