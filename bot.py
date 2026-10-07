@@ -3198,6 +3198,8 @@ def main():
                     help="account --pit: daily coin ranking (vol30 = 30-day median volume, rule C)")
     ap.add_argument("--clean", action="store_true",
                     help="account --pit: drop coins listed < 90 days and non-crypto perps")
+    ap.add_argument("--no-weekend", action="store_true",
+                    help="account: extra filter, skip setups whose signal candle is on Sat/Sun UTC; backtest only")
     ap.add_argument("--poi", action="store_true",
                     help="account: extra filter, only sweeps at a confirmed 4h swing (4h POI); backtest only")
     ap.add_argument("--pit", action="store_true",
@@ -3209,6 +3211,8 @@ def main():
     if args.pit and args.account:
         global PIT_RANK, PIT_CLEAN
         PIT_RANK, PIT_CLEAN = args.rank, args.clean
+    if args.no_weekend and args.account:
+        SMC_ACTIVE["SMC_NO_WEEKEND"] = 1.0                # account backtest only; live filters are untouched
     if args.poi and args.account:
         SMC_ACTIVE["SMC_HTF_POI"] = 1.0                   # account backtest only; live filters are untouched
     if args.data == "futures" and (args.account or args.smc):

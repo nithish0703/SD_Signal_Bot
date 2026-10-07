@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing), smc_regime = regime attribution of live trades (report only), smc_universe = coin-list rules A/B/C/D compared (report only), account_pit = account on futures data with the coin list rebuilt daily (no survivorship bias), smc_mtf = LTF/HTF timeframe combinations (report only), account_pit_poi = account_pit + only sweeps at a 4h swing (4h POI), account_pit_c = account_pit with rule C (30-day median volume) + clean list (no coins < 90 days old, crypto only); set coins = 50 / 75 / 100"
+        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing), smc_regime = regime attribution of live trades (report only), smc_universe = coin-list rules A/B/C/D compared (report only), account_pit = account on futures data with the coin list rebuilt daily (no survivorship bias), smc_mtf = LTF/HTF timeframe combinations (report only), account_pit_poi = account_pit + only sweeps at a 4h swing (4h POI), account_pit_c = account_pit with rule C (30-day median volume) + clean list (no coins < 90 days old, crypto only); set coins = 50 / 75 / 100, account_pit_c_nw = account_pit_c + no weekend signals"
         type: choice
-        options: [scan, test, backtest, account, amd, smc, smc_futures, account_futures, smc_regime, smc_universe, account_pit, smc_mtf, account_pit_poi, account_pit_c]
+        options: [scan, test, backtest, account, amd, smc, smc_futures, account_futures, smc_regime, smc_universe, account_pit, smc_mtf, account_pit_poi, account_pit_c, account_pit_c_nw]
         default: scan
       balance:
         description: "account mode: starting balance ($)"
@@ -145,11 +145,12 @@ jobs:
           elif [ "$MODE" = "smc_universe" ]; then python smc_universe.py
           elif [ "$MODE" = "smc_mtf" ]; then python smc_mtf.py
           elif [ "$MODE" = "smc_futures" ]; then python bot.py --smc --data futures --candles 6000 --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
-          elif [ "$MODE" = "account" ] || [ "$MODE" = "account_futures" ] || [ "$MODE" = "account_pit" ] || [ "$MODE" = "account_pit_poi" ] || [ "$MODE" = "account_pit_c" ]; then
+          elif [ "$MODE" = "account" ] || [ "$MODE" = "account_futures" ] || [ "$MODE" = "account_pit" ] || [ "$MODE" = "account_pit_poi" ] || [ "$MODE" = "account_pit_c" ] || [ "$MODE" = "account_pit_c_nw" ]; then
             DATA=spot; [ "$MODE" != "account" ] && DATA=futures
-            PIT=""; { [ "$MODE" = "account_pit" ] || [ "$MODE" = "account_pit_poi" ] || [ "$MODE" = "account_pit_c" ]; } && PIT="--pit"
+            PIT=""; { [ "$MODE" = "account_pit" ] || [ "$MODE" = "account_pit_poi" ] || [ "$MODE" = "account_pit_c" ] || [ "$MODE" = "account_pit_c_nw" ]; } && PIT="--pit"
             POI=""; [ "$MODE" = "account_pit_poi" ] && POI="--poi"
             [ "$MODE" = "account_pit_c" ] && POI="--rank vol30 --clean"
+            [ "$MODE" = "account_pit_c_nw" ] && POI="--rank vol30 --clean --no-weekend"
             python bot.py --account --data "$DATA" $PIT $POI \
               --balance "${{ github.event.inputs.balance }}" --margin "${{ github.event.inputs.margin }}" \
               --leverage "${{ github.event.inputs.leverage }}" --days "${{ github.event.inputs.days }}" \
