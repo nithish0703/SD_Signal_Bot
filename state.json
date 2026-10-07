@@ -1,13 +1,28 @@
 {
- "cancelled": 3,
+ "cancel_log": [
+  {
+   "at": 1791230553,
+   "cancel_ct": 1791230399999,
+   "entry": 0.57585,
+   "side": "SHORT",
+   "signal_ct": 1791212399999,
+   "sl": 0.591540762193319,
+   "sweep_t": 1791187200000,
+   "sym": "WLDUSDT",
+   "tp": 0.5538,
+   "why": "expired"
+  }
+ ],
+ "cancelled": 4,
  "closed": [],
  "last_error_alert": 0,
- "last_heartbeat": "2026-10-05",
+ "last_heartbeat": "2026-10-07",
  "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "ASTERUSDT|SHORT|smc|1h|1790834400000": 1790845313,
   "TAOUSDT|SHORT|smc|1h|1790946000000": 1790964115,
+  "WLDUSDT|SHORT|smc|1h|1791187200000": 1791212494,
   "ZECUSDT|SHORT|smc|1h|1790834400000": 1790848875
  }
 }
