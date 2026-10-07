@@ -2344,6 +2344,11 @@ def load_smc_be():
 SMC_BE = load_smc_be()
 ACCOUNT_PIT = False        # account backtest: rebuild the coin list every day (point-in-time), see --pit
 PIT_POOL = 150             # --pit: candidate pool (today's top coins by 24h volume)
+PIT_RANK = "vol24"         # --pit daily ranking: vol24 = previous day's volume, vol30 = median of the previous 30 days
+PIT_CLEAN = False          # --pit --clean: drop coins listed < PIT_MIN_AGE days ago and non-crypto perps (backtest only)
+PIT_MIN_AGE = 90
+PIT_NONCRYPTO = {"XAU", "XAG", "XPT", "XPD", "BTCDOM", "DEFI", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL",
+                 "META", "MSTR", "COIN", "HOOD", "CRCL", "SPY", "QQQ", "NATGAS", "WTI", "BRENT", "COPPER"}
 
 
 def load_smc_entry():
@@ -2903,6 +2908,7 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     cands, coins, last_close = [], 0, {}
     universe = SYMBOLS
     dvol = {}                                                    # --pit: sym -> {utc day: $ volume}
+    listed = {}                                                  # --pit --clean: sym -> first data day (None = older)
     if ACCOUNT_PIT:
         universe, _ = volume_top_symbols(max(PIT_POOL, TOP_N))
     btc_fn = None
@@ -2927,6 +2933,9 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
                 vol[d] = vol.get(d, 0.0) + x["v"] * x["c"]
                 cnt[d] = cnt.get(d, 0) + 1
             dvol[sym] = {d: v for d, v in vol.items() if cnt[d] >= 24 * per_hour}   # complete days only
+            # history shorter than requested = coin listed inside the window: its first candle is the listing day
+            req_start = int(time.time() * 1000) - need * (C[-1]["ct"] - C[-1]["t"] + 1)
+            listed[sym] = C[0]["t"] // 86400000 if C[0]["t"] > req_start + 2 * 86400000 else None
         if strategy == "smc":
             pool = [(x["side"], x) for x in tag_btc(find_smc_setups(C, H, SMC_ENTRY), sym, btc_fn) if smc_ok(x)]
         else:
@@ -2960,12 +2969,28 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
     if ACCOUNT_PIT:
         lists = {}
 
+        def eligible(sym, day):
+            if not PIT_CLEAN:
+                return True
+            if sym[:-4] in PIT_NONCRYPTO:
+                return False
+            first = listed.get(sym)
+            return first is None or day - first >= PIT_MIN_AGE
+
         def day_list(day):
-            """Top TOP_N on `day` by the previous complete day's volume (falls back up to 3 days for gaps)."""
+            """Top TOP_N on `day` ranked only with data from BEFORE `day`:
+            vol24 = previous complete day's volume (falls back up to 3 days for gaps),
+            vol30 = median of the previous 30 complete days (needs at least 20 of them)."""
             if day not in lists:
                 rows = []
                 for sym, v in dvol.items():
-                    val = next((v[d] for d in range(day - 1, day - 5, -1) if d in v), None)
+                    if not eligible(sym, day):
+                        continue
+                    if PIT_RANK == "vol30":
+                        hist = sorted(v[d] for d in range(day - 30, day) if d in v)
+                        val = hist[len(hist) // 2] if len(hist) >= 20 else None
+                    else:
+                        val = next((v[d] for d in range(day - 1, day - 5, -1) if d in v), None)
                     if val is not None:
                         rows.append((val, sym))
                 lists[day] = {sym for _, sym in sorted(rows, reverse=True)[:TOP_N]}
@@ -2974,7 +2999,10 @@ def run_account(balance, margin, leverage, days, mode="risk", risk=1.0, strategy
         cands = [c for c in cands if c["sym"] in day_list(c["day"])]
         days_all = range(int(start_ms // 86400000), int(time.time() // 86400) + 1)
         churn = [len(day_list(d) - day_list(d - 1)) for d in days_all]
-        coins_txt = (f"daily top {TOP_N} by previous-day volume (point-in-time, pool {coins}, "
+        rule_txt = "30-day median volume" if PIT_RANK == "vol30" else "previous-day volume"
+        if PIT_CLEAN:
+            rule_txt += f", clean (listed ≥{PIT_MIN_AGE}d, crypto only)"
+        coins_txt = (f"daily top {TOP_N} by {rule_txt} (point-in-time, pool {coins}, "
                      f"{len(cands)}/{before} setups kept, ~{sum(churn) / max(1, len(churn)):.1f} coins changed/day)")
         print(coins_txt)
     _rank = {sym: i for i, sym in enumerate(universe)}
@@ -3166,6 +3194,10 @@ def main():
                     help="smc/account: entry model to test (mid = FVG 50%%, top = FVG edge, ote = ICT OTE, ob = order block)")
     ap.add_argument("--data", choices=["spot", "futures"], default="spot",
                     help="smc/account backtests: candle source (futures = USDT-M futures files from data.binance.vision)")
+    ap.add_argument("--rank", choices=["vol24", "vol30"], default="vol24",
+                    help="account --pit: daily coin ranking (vol30 = 30-day median volume, rule C)")
+    ap.add_argument("--clean", action="store_true",
+                    help="account --pit: drop coins listed < 90 days and non-crypto perps")
     ap.add_argument("--poi", action="store_true",
                     help="account: extra filter, only sweeps at a confirmed 4h swing (4h POI); backtest only")
     ap.add_argument("--pit", action="store_true",
@@ -3174,6 +3206,9 @@ def main():
     if args.pit and args.account:
         global ACCOUNT_PIT
         ACCOUNT_PIT = True
+    if args.pit and args.account:
+        global PIT_RANK, PIT_CLEAN
+        PIT_RANK, PIT_CLEAN = args.rank, args.clean
     if args.poi and args.account:
         SMC_ACTIVE["SMC_HTF_POI"] = 1.0                   # account backtest only; live filters are untouched
     if args.data == "futures" and (args.account or args.smc):
