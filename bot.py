@@ -3166,12 +3166,16 @@ def main():
                     help="smc/account: entry model to test (mid = FVG 50%%, top = FVG edge, ote = ICT OTE, ob = order block)")
     ap.add_argument("--data", choices=["spot", "futures"], default="spot",
                     help="smc/account backtests: candle source (futures = USDT-M futures files from data.binance.vision)")
+    ap.add_argument("--poi", action="store_true",
+                    help="account: extra filter, only sweeps at a confirmed 4h swing (4h POI); backtest only")
     ap.add_argument("--pit", action="store_true",
                     help="account: rebuild the coin list every day from that day's data (no survivorship bias)")
     args = ap.parse_args()
     if args.pit and args.account:
         global ACCOUNT_PIT
         ACCOUNT_PIT = True
+    if args.poi and args.account:
+        SMC_ACTIVE["SMC_HTF_POI"] = 1.0                   # account backtest only; live filters are untouched
     if args.data == "futures" and (args.account or args.smc):
         global DATA_SOURCE
         DATA_SOURCE = "futures"
