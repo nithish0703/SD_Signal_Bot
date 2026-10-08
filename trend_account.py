@@ -147,13 +147,15 @@ def funding(sym, start_ms):
 
 def simulate(trades, closes, fund, times):
     """trades: list of dicts {sym, side, t_in, entry, risk, t_out, exit}. Returns account stats."""
-    by_in, by_out = {}, {}
+    by_in = {}
     for k, tr in enumerate(trades):
         by_in.setdefault(tr["t_in"], []).append(k)
     cash, open_, taken, skipped = START_BAL, {}, 0, 0
     eq_curve, peak, mdd, max_open = [], START_BAL, 0.0, 0
     fidx = {s: 0 for s in fund}
     realized = []
+    last = {}                                       # last known close per coin (carried over a missing candle)
+    px = lambda p: last.get(p["sym"], p["entry"])
     prev_t = None
     for t in times:
         # 1) funding paid/received for every funding time in (prev_t, t]
@@ -163,9 +165,8 @@ def simulate(trades, closes, fund, times):
                 while i < len(fl) and fl[i][0] <= prev_t:
                     i += 1
                 j = i
-                px = closes[p["sym"]].get(prev_t, p["entry"])
                 while j < len(fl) and fl[j][0] <= t:
-                    p["fund"] += p["side"] * p["qty"] * px * fl[j][1]
+                    p["fund"] += p["side"] * p["qty"] * px(p) * fl[j][1]
                     j += 1
             for s in fund:                                              # advance pointers
                 fl, i = fund[s], fidx[s]
@@ -183,9 +184,8 @@ def simulate(trades, closes, fund, times):
             tr = trades[k]
             qty = RISK / tr["risk"]
             open_risk = sum(RISK for _ in open_)
-            equity = cash + sum(p["side"] * p["qty"] * (closes[p["sym"]].get(prev_t, p["entry"]) - p["entry"]) - p["fund"]
-                                for p in open_.values())
-            notional = sum(p["qty"] * closes[p["sym"]].get(prev_t, p["entry"]) for p in open_.values())
+            equity = cash + sum(p["side"] * p["qty"] * (px(p) - p["entry"]) - p["fund"] for p in open_.values())
+            notional = sum(p["qty"] * px(p) for p in open_.values())
             if open_risk + RISK > MAX_OPEN_RISK or notional + qty * tr["entry"] > MAX_LEV * equity:
                 skipped += 1
                 continue
@@ -194,8 +194,11 @@ def simulate(trades, closes, fund, times):
             taken += 1
         max_open = max(max_open, len(open_))
         # 4) mark to market at this 4h close
-        unreal = sum(p["side"] * p["qty"] * (closes[p["sym"]].get(t, p["entry"]) - p["entry"]) - p["fund"]
-                     for p in open_.values())
+        for s in closes:
+            c = closes[s].get(t)
+            if c is not None:
+                last[s] = c
+        unreal = sum(p["side"] * p["qty"] * (px(p) - p["entry"]) - p["fund"] for p in open_.values())
         eq = cash + unreal
         eq_curve.append((t, eq))
         peak = max(peak, eq)
@@ -222,8 +225,10 @@ def main():
         bot._FUT_CACHE.pop(sym, None)
         span = [x for x in c1 if x["t"] >= start - 50 * DAY]
         expect = (c1[-1]["t"] - (start - 50 * DAY)) / 3600000
-        if not c1 or c1[0]["t"] > start - 50 * DAY or len(span) < 0.98 * expect:
-            notes.append(f"{sym[:-4]} skipped (futures history incomplete: {len(span)}/{expect:.0f} hours)")
+        gap = max((b["t"] - a["t"] for a, b in zip(span, span[1:])), default=0) / 3600000
+        if not c1 or c1[0]["t"] > start - 50 * DAY or len(span) < 0.98 * expect or gap > 24:
+            notes.append(f"{sym[:-4]} skipped (futures history incomplete: {len(span)}/{expect:.0f} hours, "
+                         f"largest gap {gap:.0f}h)")
             continue
         H = bot._aggregate(c1, 4)
         D = bot._aggregate(c1, 24)
