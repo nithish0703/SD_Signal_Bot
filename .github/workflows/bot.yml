@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing), smc_oos = out-of-sample research: rule built on the first 2 of 4 years, tested once on the last 2 (report only), ict_test = ICT engine: London Judas / NY AM / Silver Bullet on 15m, 20 coins, 4 years, fixed rules (report only), trend_test = trend-following engine: Donchian 20/10 daily + EMA 50/200 4h, 20 coins, 4 years, fixed rules (report only), trend_acct = trend account simulation: $1000, 0.5% risk, futures + real funding, mark-to-market drawdown (report only), trend_paper = T2 trend PAPER signals bot: waits for each 4h close, then starts its own next run (start once on branch research; cancel the run to stop), trend_small = T2 trend with a $100 account + real Binance order-size limits (report only), trend_top50 = same $100 test without BTC/ETH on the top 30 and top 50 coins picked every month (report only)"
+        description: "scan = normal run, test = Telegram test message, backtest = compare exits, account = simulate a real account, amd = backtest AMD, smc = backtest SMC sweep-MSS-FVG, *_futures = same backtest on futures candles (compare only, saves nothing), smc_oos = out-of-sample research: rule built on the first 2 of 4 years, tested once on the last 2 (report only), ict_test = ICT engine: London Judas / NY AM / Silver Bullet on 15m, 20 coins, 4 years, fixed rules (report only), trend_test = trend-following engine: Donchian 20/10 daily + EMA 50/200 4h, 20 coins, 4 years, fixed rules (report only), trend_acct = trend account simulation: $1000, 0.5% risk, futures + real funding, mark-to-market drawdown (report only), trend_paper = T2 trend PAPER signals bot: waits for each 4h close, then starts its own next run (start once on branch research; cancel the run to stop), trend_small = T2 trend with a $100 account + real Binance order-size limits (report only), trend_top50 = trend test without BTC/ETH on the top 30 and top 50 coins picked every month; start = balance input, risks = 0.5,1,1.5,2 or a list in the risk input (report only)"
         type: choice
         options: [scan, test, backtest, account, amd, smc, smc_futures, account_futures, smc_oos, ict_test, trend_test, trend_acct, trend_paper, trend_small, trend_top50]
         default: scan
@@ -147,7 +147,7 @@ jobs:
           elif [ "$MODE" = "trend_acct" ]; then python trend_account.py
           elif [ "$MODE" = "trend_paper" ]; then python trend_bot.py --wait
           elif [ "$MODE" = "trend_small" ]; then python trend_small.py
-          elif [ "$MODE" = "trend_top50" ]; then python trend_top50.py
+          elif [ "$MODE" = "trend_top50" ]; then TREND_BALANCE="${{ github.event.inputs.balance }}" TREND_RISKS="${{ github.event.inputs.risk }}" python trend_top50.py
           elif [ "$MODE" = "smc_futures" ]; then python bot.py --smc --data futures --candles 6000 --top-n "${{ github.event.inputs.coins }}" --entry "${{ github.event.inputs.entry }}"
           elif [ "$MODE" = "account" ] || [ "$MODE" = "account_futures" ]; then
             DATA=spot; [ "$MODE" = "account_futures" ] && DATA=futures

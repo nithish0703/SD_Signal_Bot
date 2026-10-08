@@ -1,4 +1,4 @@
-"""T2 trend, $100 account, WITHOUT BTC/ETH, on the TOP 30 and TOP 50 coins - report only, changes nothing live.
+"""T2 trend, small account ($100 default, TREND_BALANCE), WITHOUT BTC/ETH, on the TOP 30 and TOP 50 coins - report only, changes nothing live.
 
 Same rules, costs and sizing as trend_small.py (EMA50/200 cross + 3 ATR chandelier on 4h, long+short, futures 1h
 candles from data.binance.vision, real funding, 0.10% fees, no compounding, max 12 open, size <= 3x equity,
@@ -14,7 +14,9 @@ trade is open, it is closed at the last price.
 Top 30 = the first 30 of the same monthly ranking.
 Compared with: the fixed 18-coin list (the 20 majors minus BTC/ETH) - picked with today's knowledge, so it is
 slightly optimistic.
-Scenarios: $0.50 / $1 / $2 risk per trade, $100 start. Pass = >=3 of 4 years up, max DD < 25%, final above $100.
+Scenarios: start balance = TREND_BALANCE (workflow "balance" input, default $100); $ risk per trade = TREND_RISKS
+(workflow "risk" input when it is a list like 0.5,1,1.5,2; otherwise 0.5, 1, 1.5, 2).
+Pass = >=3 of 4 years up, max DD < 25%, final above the start balance.
 """
 import csv
 import io
@@ -177,7 +179,7 @@ def report_rows(name, r, yb):
           + f" | ${r['final']:,.1f} | {(r['final'] / S.START_BAL - 1) * 100:+.0f}% | −{r['mdd'] * 100:.1f}% | "
             f"${worst:+,.1f} | {pos_m}/{len(mchg)} | {r['taken']} | {r['sk_small']} | {r['sk_cap']} | "
             f"{r['max_open']} | {'✅' if ok else '❌'} |")
-    tgl = (f"{'✅' if ok else '❌'} <b>{bot.esc(name)}</b>: $100 → <b>${r['final']:,.1f}</b> "
+    tgl = (f"{'✅' if ok else '❌'} <b>{bot.esc(name)}</b>: ${S.START_BAL:,.0f} → <b>${r['final']:,.1f}</b> "
            f"({(r['final'] / S.START_BAL - 1) * 100:+.0f}%), DD −{r['mdd'] * 100:.1f}%, worst month ${worst:+,.1f}, "
            f"{pos_m}/{len(mchg)} months up\n   years: " + " · ".join(f"${x:+,.1f}" for x in ychg)
            + f"\n   trades {r['taken']}, skipped: too small {r['sk_small']}, cap {r['sk_cap']}; max {r['max_open']} open")
@@ -189,6 +191,10 @@ def main():
     now = time.time() * 1000
     start = now - YEARS * 365.25 * DAY
     hours = int(YEARS * 365.25 * 24) + 140 * 24
+    S.START_BAL = float(os.getenv("TREND_BALANCE", "") or 100)
+    rs = os.getenv("TREND_RISKS", "")
+    risks = [float(x) for x in rs.split(",") if x.strip()] if "," in rs else [0.5, 1.0, 1.5, 2.0]
+    print(f"start ${S.START_BAL:g}, risks {risks}", flush=True)
     limits, lim_src = S.live_limits()
     top, n_syms, failed = universe(start)
     need = sorted(set(FIXED18) | {s for v in top.values() for s in v})
@@ -230,19 +236,20 @@ def main():
     yname = [f"{datetime.fromtimestamp(yb[i] / 1000, timezone.utc):%b %y}" for i in range(YEARS)]
     used = {s for v in top.values() for s in v}
     dead = sorted(s[:-4] for s in used if s in data and data[s][-1]["t"] < end_t - 3 * DAY)
-    out = [f"## T2 trend - $100 account, no BTC/ETH, top 30 and top {TOP_N} point-in-time vs fixed 18 coins, {YEARS} years\n",
+    out = [f"## T2 trend - ${S.START_BAL:,.0f} account, no BTC/ETH, top 30 and top {TOP_N} point-in-time vs fixed 18 coins, {YEARS} years\n",
            f"{n_syms} symbols ranked every month; {len(used)} different coins were in the top {TOP_N} at some point "
            f"({len(dead)} of them later delisted or stopped). Futures + real funding, 0.10% fees, no compounding, "
            f"max 12 open, size <= 3x equity. Size limits: {lim_src} (other coins: $5 minimum).\n",
            "| Scenario | " + " | ".join(f"Year from {y}" for y in yname)
            + " | Final | Return | Max DD | Worst month | Months up | Taken | Skipped small | Skipped cap | Max open | Pass? |",
            "|---|" + "---|" * YEARS + "---|---|---|---|---|---|---|---|---|---|"]
-    tg = [f"💼 <b>T2 trend — $100, no BTC/ETH, top 30 / top {TOP_N} coins</b> ({YEARS} years, futures + real funding)",
+    tg = [f"💼 <b>T2 trend — ${S.START_BAL:,.0f}, no BTC/ETH, top 30 / top {TOP_N} coins</b> ({YEARS} years, futures + real funding)",
           f"Top 30 / {TOP_N} picked every month from that time's volume ({len(used)} coins in total, {len(dead)} later "
-          f"delisted - included). No compounding. Pass = ≥3 of 4 years up, DD &lt; 25%, final above $100."]
+          f"delisted - included). No compounding. Pass = ≥3 of 4 years up, DD &lt; 25%, final above ${S.START_BAL:,.0f}. "
+          f"Risk per trade: " + ", ".join(f"${x:g} ({x / S.START_BAL * 100:.2g}%)" for x in risks)]
     for uname, udata, allowed in uni:
         trades = build_trades(udata, allowed, end_t)
-        for risk_usd in (0.5, 1.0, 2.0):
+        for risk_usd in risks:
             r = S.simulate(trades, closes, fund, times, risk_usd, limits)
             md, tgl = report_rows(f"{uname}, ${risk_usd:g} risk", r, yb)
             out.append(md)
