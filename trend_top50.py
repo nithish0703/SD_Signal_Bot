@@ -296,10 +296,18 @@ def main():
     if os.getenv("GITHUB_STEP_SUMMARY"):
         with open(os.getenv("GITHUB_STEP_SUMMARY"), "a") as f:
             f.write(report + "\n")
-    msg = "\n\n".join(tg)
-    print(re.sub(r"</?b>", "", msg))
-    for i in range(0, len(msg), 3900):
-        bot.tg(msg[i:i + 3900])
+    print(re.sub(r"</?b>", "", "\n\n".join(tg)))
+    chunks, cur = [], ""
+    for part in tg:                                     # split only between sections, never inside an HTML tag
+        if cur and len(cur) + len(part) + 2 > 3800:
+            chunks.append(cur)
+            cur = ""
+        cur = f"{cur}\n\n{part}" if cur else part
+    if cur:
+        chunks.append(cur)
+    for c in chunks:
+        bot.tg(c)
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":
