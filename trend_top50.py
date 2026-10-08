@@ -17,6 +17,7 @@ slightly optimistic.
 Scenarios: start balance = TREND_BALANCE (workflow "balance" input, default $100); $ risk per trade = TREND_RISKS
 (workflow "risk" input when it is a list like 0.5,1,1.5,2; otherwise 0.5, 1, 1.5, 2).
 Pass = >=3 of 4 years up, max DD < 25%, final above the start balance.
+Also: a fresh start 6 and 3 months ago (same rules, start balance, nothing open before the start).
 """
 import csv
 import io
@@ -191,9 +192,12 @@ def main():
     now = time.time() * 1000
     start = now - YEARS * 365.25 * DAY
     hours = int(YEARS * 365.25 * 24) + 140 * 24
-    S.START_BAL = float(os.getenv("TREND_BALANCE", "") or 100)
-    rs = os.getenv("TREND_RISKS", "")
-    risks = [float(x) for x in rs.split(",") if x.strip()] if "," in rs else [0.5, 1.0, 1.5, 2.0]
+    num = r"\d+(?:\.\d+)?"
+    bal = re.findall(num, os.getenv("TREND_BALANCE", "").replace(",", ""))             # "300", "$300" -> 300; empty -> 100
+    S.START_BAL = float(bal[0]) if bal and float(bal[0]) > 0 else 100.0
+    risks = [float(x) for x in re.findall(num, os.getenv("TREND_RISKS", "")) if float(x) > 0]
+    if len(risks) < 2:                                                   # the input's default "1" -> the 4 standard risks
+        risks = [0.5, 1.0, 1.5, 2.0]
     print(f"start ${S.START_BAL:g}, risks {risks}", flush=True)
     limits, lim_src = S.live_limits()
     top, n_syms, failed = universe(start)
@@ -247,13 +251,34 @@ def main():
           f"Top 30 / {TOP_N} picked every month from that time's volume ({len(used)} coins in total, {len(dead)} later "
           f"delisted - included). No compounding. Pass = ≥3 of 4 years up, DD &lt; 25%, final above ${S.START_BAL:,.0f}. "
           f"Risk per trade: " + ", ".join(f"${x:g} ({x / S.START_BAL * 100:.2g}%)" for x in risks)]
+    windows = [(6, 182.5), (3, 91.25)]                 # fresh start N months ago: $START_BAL, nothing open before
+    short_md = ["\n### Fresh start in the last 6 / 3 months (bot started then with "
+                f"${S.START_BAL:,.0f}, no trades open before)\n",
+                "| Scenario | Last 6 months | DD | Trades | Last 3 months | DD | Trades |",
+                "|---|---|---|---|---|---|---|"]
+    short_tg = [f"🕒 <b>Fresh start in the last 6 / 3 months</b> (bot started then with ${S.START_BAL:,.0f}, "
+                "nothing open before; open trades valued at the last price)"]
     for uname, udata, allowed in uni:
         trades = build_trades(udata, allowed, end_t)
+        short_tg.append(f"<b>{bot.esc(uname)}</b>")
         for risk_usd in risks:
             r = S.simulate(trades, closes, fund, times, risk_usd, limits)
             md, tgl = report_rows(f"{uname}, ${risk_usd:g} risk", r, yb)
             out.append(md)
             tg.append(tgl)
+            cells, parts = [], []
+            for mo, days in windows:
+                ws = end_t - days * DAY
+                rw = S.simulate([x for x in trades if x["t_in"] >= ws], closes, fund,
+                                [t for t in times if t >= ws], risk_usd, limits)
+                pnl = rw["final"] - S.START_BAL
+                cells += [f"${pnl:+,.1f} ({pnl / S.START_BAL * 100:+.1f}%)", f"−{rw['mdd'] * 100:.1f}%",
+                          str(rw["taken"])]
+                parts.append(f"{mo}m <b>${pnl:+,.1f}</b> (DD −{rw['mdd'] * 100:.1f}%, {rw['taken']} trades)")
+            short_md.append(f"| {uname}, ${risk_usd:g} risk | " + " | ".join(cells) + " |")
+            short_tg.append(f"   ${risk_usd:g}: " + " · ".join(parts))
+    out += short_md
+    tg.append("\n".join(short_tg))
     if dead:
         out.append("\nCoins that stopped trading (included): " + ", ".join(dead))
     out.append("\nTop list per month: " + "; ".join(f"{k}: " + ", ".join(s[:-4] for s in v[:10]) + " ..."
