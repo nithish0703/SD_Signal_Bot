@@ -69,11 +69,11 @@ def size(tr, risk_usd, limits):
     qty = risk_usd / tr["risk"]
     if limits is None:
         return qty, risk_usd
-    step, mn = limits[tr["sym"]]
-    q = math.floor(qty / step + 1e-9) * step
+    step, mn = limits.get(tr["sym"], (0, 5))           # unknown coin: $5 minimum, size not rounded
+    q = math.floor(qty / step + 1e-9) * step if step else qty
     if q > 0 and q * tr["entry"] >= mn:
         return q, q * tr["risk"]
-    q = max(step, math.ceil(mn / tr["entry"] / step - 1e-9) * step)
+    q = max(step, math.ceil(mn / tr["entry"] / step - 1e-9) * step) if step else mn / tr["entry"]
     if q * tr["risk"] <= TOL * risk_usd:
         return q, q * tr["risk"]
     return None, "small"
