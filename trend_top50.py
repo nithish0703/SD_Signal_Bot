@@ -42,7 +42,8 @@ EXCLUDE = {"BTCUSDT", "ETHUSDT", "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT"
            "USDEUSDT", "USD1USDT", "RLUSDUSDT", "EURUSDT", "XUSDUSDT", "PYUSDUSDT", "BFUSDUSDT",
            "XAUUSDT", "XAGUSDT", "XPTUSDT", "XPDUSDT", "PAXGUSDT", "XAUTUSDT", "TSLAUSDT", "NVDAUSDT", "AAPLUSDT",
            "MSTRUSDT", "COINUSDT", "HOODUSDT", "AMZNUSDT", "GOOGLUSDT", "METAUSDT", "MSFTUSDT", "WMTUSDT", "SPYUSDT",
-           "QQQUSDT", "CRCLUSDT", "INTCUSDT", "AMDUSDT", "NFLXUSDT", "PLTRUSDT", "ORCLUSDT", "BABAUSDT"}
+           "QQQUSDT", "CRCLUSDT", "INTCUSDT", "AMDUSDT", "NFLXUSDT", "PLTRUSDT", "ORCLUSDT", "BABAUSDT",
+           "BTCDOMUSDT", "DEFIUSDT", "FOOTBALLUSDT", "BLUEBIRDUSDT", "ALL1USDT"}          # index contracts
 FIXED18 = [s for s in TA.COINS if s not in ("BTCUSDT", "ETHUSDT")]
 
 
@@ -112,7 +113,10 @@ def universe(start_ms):
     for prev, cur in zip(months, months[1:]):
         pk = prev.strftime("%Y-%m")
         cand = [(vol[s][pk][0], s) for s in vol if pk in vol[s] and vol[s][pk][1] >= 20]
-        top[cur.strftime("%Y-%m")] = [s for _, s in sorted(cand, reverse=True)[:TOP_N]]
+        ranked = [s for _, s in sorted(cand, reverse=True)[:TOP_N]]
+        if len(ranked) < TOP_N // 2 and top:                         # previous month's file not published yet
+            ranked = top[max(top)]
+        top[cur.strftime("%Y-%m")] = ranked
     return top, len(syms), failed
 
 
@@ -134,16 +138,19 @@ def load(sym, hours, start):
 def build_trades(data, allowed, end_t):
     """T2 trades; entries only when allowed(sym, t_in) is True. Delisted while open -> close at the last price."""
     trades = []
-    for sym, H in data.items():
-        if len(H) < 260:
-            continue
-        for side, t_in, entry, risk, t_out, ex in TA.t2_trades(H, False):
-            if not allowed(sym, t_in) or t_in - H[0]["t"] < MIN_HIST:
+    for sym, full in data.items():
+        cuts = [0] + [i + 1 for i in range(len(full) - 1) if full[i + 1]["t"] - full[i]["t"] > 3 * DAY] + [len(full)]
+        for a, b in zip(cuts, cuts[1:]):                             # each unbroken stretch of data on its own
+            H = full[a:b]
+            if len(H) < 260:
                 continue
-            if t_out is None and H[-1]["t"] < end_t - 3 * DAY:          # data stopped = delisted
-                t_out, ex = H[-1]["t"] + H4, H[-1]["c"]
-            trades.append({"sym": sym, "side": side, "t_in": t_in, "entry": entry, "risk": risk,
-                           "t_out": t_out, "exit": ex, "model": "T2"})
+            for side, t_in, entry, risk, t_out, ex in TA.t2_trades(H, False):
+                if not allowed(sym, t_in) or t_in - H[0]["t"] < MIN_HIST:
+                    continue
+                if t_out is None and H[-1]["t"] < end_t - 3 * DAY:      # data stopped = delisted (or a gap)
+                    t_out, ex = H[-1]["t"] + H4, H[-1]["c"]
+                trades.append({"sym": sym, "side": side, "t_in": t_in, "entry": entry, "risk": risk,
+                               "t_out": t_out, "exit": ex, "model": "T2"})
     return trades
 
 
