@@ -17,10 +17,39 @@
  "closed": [],
  "last_error_alert": 0,
  "last_heartbeat": "2026-10-10",
- "open": {},
+ "open": {
+  "QNTUSDT|SHORT|smc|1h|1791637200000": {
+   "cancel": 238.4191317933229,
+   "entry": 249.76,
+   "expires_ct": 1791662399999,
+   "fee_r": 0.0440460104902639,
+   "fut": {
+    "entry": 249.5588077976478,
+    "ratio": 0.9991944578701466,
+    "sl": 255.47989880154896,
+    "tp": 220.45227323989045
+   },
+   "kind": "smc",
+   "last_ct": 1791647999999,
+   "opened": 1791647999999,
+   "risk": 5.67043410333855,
+   "side": "SHORT",
+   "sl": 255.43043410333854,
+   "sl0": 255.43043410333854,
+   "slp": 2.2703531803885935,
+   "source": "spot-vision",
+   "status": "pending",
+   "sweep_t": 1791637200000,
+   "sym": "QNTUSDT",
+   "tf": "1h",
+   "tp": 220.63,
+   "usd_r": 0.9081412721554374
+  }
+ },
  "paper_since": "2026-10-01",
  "sent": {
   "ASTERUSDT|SHORT|smc|1h|1790834400000": 1790845313,
+  "QNTUSDT|SHORT|smc|1h|1791637200000": 1791648113,
   "TAOUSDT|SHORT|smc|1h|1790946000000": 1790964115,
   "WLDUSDT|SHORT|smc|1h|1791187200000": 1791212494,
   "ZECUSDT|SHORT|smc|1h|1790834400000": 1790848875
