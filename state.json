@@ -11,41 +11,25 @@
    "sym": "WLDUSDT",
    "tp": 0.5538,
    "why": "expired"
+  },
+  {
+   "at": 1791666149,
+   "cancel_ct": 1791665999999,
+   "entry": 249.76,
+   "side": "SHORT",
+   "signal_ct": 1791647999999,
+   "sl": 255.43043410333854,
+   "sweep_t": 1791637200000,
+   "sym": "QNTUSDT",
+   "tp": 220.63,
+   "why": "expired"
   }
  ],
- "cancelled": 4,
+ "cancelled": 5,
  "closed": [],
  "last_error_alert": 0,
  "last_heartbeat": "2026-10-10",
- "open": {
-  "QNTUSDT|SHORT|smc|1h|1791637200000": {
-   "cancel": 238.4191317933229,
-   "entry": 249.76,
-   "expires_ct": 1791662399999,
-   "fee_r": 0.0440460104902639,
-   "fut": {
-    "entry": 249.5588077976478,
-    "ratio": 0.9991944578701466,
-    "sl": 255.47989880154896,
-    "tp": 220.45227323989045
-   },
-   "kind": "smc",
-   "last_ct": 1791662399999,
-   "opened": 1791647999999,
-   "risk": 5.67043410333855,
-   "side": "SHORT",
-   "sl": 255.43043410333854,
-   "sl0": 255.43043410333854,
-   "slp": 2.2703531803885935,
-   "source": "spot-vision",
-   "status": "pending",
-   "sweep_t": 1791637200000,
-   "sym": "QNTUSDT",
-   "tf": "1h",
-   "tp": 220.63,
-   "usd_r": 0.9081412721554374
-  }
- },
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "ASTERUSDT|SHORT|smc|1h|1790834400000": 1790845313,
