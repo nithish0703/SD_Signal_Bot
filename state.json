@@ -50,41 +50,34 @@
   }
  ],
  "cancelled": 7,
- "closed": [],
- "last_error_alert": 0,
- "last_heartbeat": "2026-10-14",
- "open": {
-  "TRUMPUSDT|SHORT|smc|1h|1791964800000": {
-   "cancel": 1.8433234505529401,
+ "closed": [
+  {
+   "closed": 1792033340,
    "entry": 1.8984999999999999,
-   "expires_ct": 1791997199999,
-   "fee_r": 0.06881546668015383,
+   "exit": 1.787,
+   "exit_ct": 1792033199999,
    "fill_ct": 1791997199999,
-   "fut": {
-    "entry": 1.8975101668404588,
-    "ratio": 0.9994786235662149,
-    "sl": 1.9270091417453865,
-    "tp": 1.786068300312826
-   },
-   "kind": "smc",
-   "last_ct": 1792029599999,
-   "mae": 0.5980801686713462,
-   "mfe": 1.8667350719135707,
-   "opened": 1791982799999,
-   "risk": 0.02758827472352987,
+   "mae": 0.598,
+   "mfe": 5.781,
+   "net": 3.973,
+   "r": 4.042,
    "side": "SHORT",
+   "signal_ct": 1791982799999,
+   "simple": 3.973,
    "sl": 1.9260882747235297,
-   "sl0": 1.9260882747235297,
-   "slp": 1.453161692047926,
-   "source": "spot-vision",
-   "status": "filled",
+   "slp": 1.453,
+   "strategy": "smc",
    "sweep_t": 1791964800000,
    "sym": "TRUMPUSDT",
    "tf": "1h",
    "tp": 1.787,
-   "usd_r": 0.9445550998311519
+   "usd": 3.75,
+   "why": "TP HIT"
   }
- },
+ ],
+ "last_error_alert": 0,
+ "last_heartbeat": "2026-10-14",
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "ASTERUSDT|SHORT|smc|1h|1790834400000": 1790845313,
