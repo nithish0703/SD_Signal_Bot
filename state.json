@@ -47,9 +47,21 @@
    "sym": "SUIUSDT",
    "tp": 0.9935,
    "why": "expired"
+  },
+  {
+   "at": 1792098162,
+   "cancel_ct": 1792097999999,
+   "entry": 1.31315,
+   "side": "LONG",
+   "signal_ct": 1792079999999,
+   "sl": 1.2822448223286125,
+   "sweep_t": 1792069200000,
+   "sym": "XRPUSDT",
+   "tp": 1.3868,
+   "why": "expired"
   }
  ],
- "cancelled": 7,
+ "cancelled": 8,
  "closed": [
   {
    "closed": 1792033340,
@@ -77,35 +89,7 @@
  ],
  "last_error_alert": 0,
  "last_heartbeat": "2026-10-15",
- "open": {
-  "XRPUSDT|LONG|smc|1h|1792069200000": {
-   "cancel": 1.3749603553427752,
-   "entry": 1.31315,
-   "expires_ct": 1792094399999,
-   "fee_r": 0.0424896440966179,
-   "fut": {
-    "entry": 1.3124596988585162,
-    "ratio": 0.9994743166115951,
-    "sl": 1.2802891967581207,
-    "tp": 1.3860709822769601
-   },
-   "kind": "smc",
-   "last_ct": 1792094399999,
-   "opened": 1792079999999,
-   "risk": 0.030905177671387563,
-   "side": "LONG",
-   "sl": 1.2822448223286125,
-   "sl0": 1.2822448223286125,
-   "slp": 2.353514653420216,
-   "source": "spot-vision",
-   "status": "pending",
-   "sweep_t": 1792069200000,
-   "sym": "XRPUSDT",
-   "tf": "1h",
-   "tp": 1.3868,
-   "usd_r": 0.9414058613680863
-  }
- },
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "QNTUSDT|SHORT|smc|1h|1791637200000": 1791648113,
