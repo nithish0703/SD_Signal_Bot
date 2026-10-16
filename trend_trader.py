@@ -303,7 +303,8 @@ class Trader:
             self.notify(f"📋 <b>Top 30 for {month}</b> (by {used} Binance futures volume): "
                         + ", ".join(x[:-4] + ("*" if src.get(x) == "bitget" else "") for x in top)
                         + ("\n* = futures-only coin, paper prices from Bitget futures" if "bitget" in src.values() else "")
-                        + (f"\n⚠️ No price data on GitHub for: {', '.join(x[:-4] for x in nod)} (skipped)" if nod else ""))
+                        + (f"\n⚠️ Not enough price data on GitHub for: {', '.join(x[:-4] for x in nod)} "
+                           "(too new or no source - skipped)" if nod else ""))
             return True
         cands = []
         for s in self.ex.market_symbols():
@@ -601,10 +602,14 @@ class PaperEx:
         raise BinanceError(-1, f"GET failed {url}")
 
     def spot_syms(self):
+        """Binance spot pairs; None if the list could not be downloaded (then spot is tried first per coin)."""
         if self._spot_syms is None:
-            info = self._get(f"{self.SPOT}/exchangeInfo")
-            self._spot_syms = {x["symbol"] for x in info["symbols"] if x.get("status") == "TRADING"}
-        return self._spot_syms
+            try:
+                info = self._get(f"{self.SPOT}/exchangeInfo")
+                self._spot_syms = {x["symbol"] for x in info["symbols"] if x.get("status") == "TRADING"}
+            except Exception:
+                self._spot_syms = False
+        return self._spot_syms or None
 
     @staticmethod
     def spot_of(sym):
@@ -619,7 +624,8 @@ class PaperEx:
     def source(self, sym):
         """Binance spot candles when the coin has a spot pair (1000x contracts scaled), else Bitget USDT futures."""
         spot, k = self.spot_of(sym)
-        if spot in self.spot_syms():
+        known = self.spot_syms()
+        if known is None or spot in known:
             return "spot", spot, k
         return "bitget", sym, 1.0
 
@@ -629,16 +635,22 @@ class PaperEx:
             return self._cache[key]
         src, name, k = self.source(sym)
         ms = {"1h": 3600000, "4h": H4, "1d": DAY}[interval]
+        out = None
         if src == "spot":
             p = {"symbol": name, "interval": interval, "limit": limit}
             if start is not None:
                 p["startTime"] = start
             if end is not None:
                 p["endTime"] = end
-            rows = self._get(f"{self.SPOT}/klines", p)
-            out = [{"t": int(r[0]), "o": float(r[1]) * k, "h": float(r[2]) * k, "l": float(r[3]) * k,
-                    "c": float(r[4]) * k, "ct": int(r[6]), "qv": float(r[7])} for r in rows]
-        else:
+            try:
+                rows = self._get(f"{self.SPOT}/klines", p)
+                out = [{"t": int(r[0]), "o": float(r[1]) * k, "h": float(r[2]) * k, "l": float(r[3]) * k,
+                        "c": float(r[4]) * k, "ct": int(r[6]), "qv": float(r[7])} for r in rows]
+            except BinanceError as e:
+                if e.code != 400 or self.spot_syms() is not None:
+                    raise
+                name = sym                                  # spot list unknown and no spot pair: use Bitget
+        if out is None:
             p = {"symbol": name, "productType": "USDT-FUTURES", "granularity": interval.upper(),
                  "limit": min(limit, 1000)}
             if start is not None:
@@ -702,9 +714,10 @@ class PaperEx:
                 top = [s for _, s in sorted(got, reverse=True)[:TOP_N]]
                 self.d["known"] = sorted(set(self.d["known"]) | set(top))
                 self.d["nodata"] = []
-                for s in top:                               # every Top 30 coin needs candles from somewhere
+                for s in top:                               # every Top 30 coin needs enough candles somewhere
                     try:
-                        self.klines(s, "4h", 5)
+                        if len(self.klines(s, "4h", 1000)) < 260:
+                            self.d["nodata"].append(s)
                     except Exception:
                         self.d["nodata"].append(s)
                 self.d["sources"] = {s: self.source(s)[0] for s in top}
@@ -735,7 +748,12 @@ class PaperEx:
     def price(self, sym):
         src, name, k = self.source(sym)
         if src == "spot":
-            return float(self._get(f"{self.SPOT}/ticker/price", {"symbol": name})["price"]) * k
+            try:
+                return float(self._get(f"{self.SPOT}/ticker/price", {"symbol": name})["price"]) * k
+            except BinanceError as e:
+                if e.code != 400 or self.spot_syms() is not None:
+                    raise
+                name = sym
         d = self._get(f"{self.BITGET}/ticker", {"symbol": name, "productType": "USDT-FUTURES"})
         return float(d["data"][0]["lastPr"])
 
