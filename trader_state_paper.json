@@ -1,5 +1,5 @@
 {
- "last_ct": 1792137599999,
+ "last_ct": 1792151999999,
  "pos": {
   "LINKUSDT": {
    "side": -1,
@@ -16,34 +16,34 @@
  "universe": [
   "ZECUSDT",
   "SOLUSDT",
+  "SNDKUSDT",
   "XRPUSDT",
+  "CLUSDT",
+  "SOXLUSDT",
+  "SPCXUSDT",
+  "SKHYNIXUSDT",
   "HYPEUSDT",
   "NEARUSDT",
   "DOGEUSDT",
+  "BZUSDT",
   "UNIUSDT",
   "BNBUSDT",
   "SUIUSDT",
+  "MUUSDT",
+  "KORUUSDT",
   "LSKUSDT",
   "ENAUSDT",
+  "SKHYUSDT",
   "1000PEPEUSDT",
   "QNTUSDT",
+  "SNXXUSDT",
+  "AKEUSDT",
   "ARBUSDT",
   "WLDUSDT",
   "PUMPUSDT",
   "LINKUSDT",
   "ADAUSDT",
-  "TAOUSDT",
-  "AVAXUSDT",
-  "MARSCOINUSDT",
-  "BCHUSDT",
-  "ONDOUSDT",
-  "FILUSDT",
-  "TRUMPUSDT",
-  "\u725b\u6765USDT",
-  "LTCUSDT",
-  "DASHUSDT",
-  "ONEUSDT",
-  "AAVEUSDT"
+  "TAOUSDT"
  ],
  "universe_month": "2026-10",
  "day": "2026-10-16",
@@ -51,5 +51,6 @@
  "paused_day": null,
  "started": "15 Oct 2026 12:01 IST",
  "eq0": 300.0,
- "eq_first": 300.0
+ "eq_first": 300.0,
+ "universe_rule": "futures-top30-v2"
 }
