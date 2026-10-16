@@ -289,15 +289,21 @@ class Trader:
     def refresh_universe(self, now_ms):
         d = datetime.fromtimestamp(now_ms / 1000, timezone.utc)
         month = d.strftime("%Y-%m")
-        if self.st.get("universe_month") == month and self.st.get("universe"):
+        rule = getattr(self.ex, "RULE", None)
+        if self.st.get("universe_month") == month and self.st.get("universe") and self.st.get("universe_rule") == rule:
             return False
         first = d.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         prev_first = (first - timedelta(days=1)).replace(day=1)
         start, end = int(prev_first.timestamp() * 1000), int(first.timestamp() * 1000) - 1
         if hasattr(self.ex, "top_symbols"):                # paper mode: futures volume files on data.binance.vision
             top, used = self.ex.top_symbols(prev_first)
-            self.st["universe"], self.st["universe_month"] = top, month
-            self.notify(f"📋 <b>Top 30 for {month}</b> (by {used} futures volume): " + ", ".join(x[:-4] for x in top))
+            self.st["universe"], self.st["universe_month"], self.st["universe_rule"] = top, month, rule
+            src = self.ex.d.get("sources", {})
+            nod = self.ex.d.get("nodata", [])
+            self.notify(f"📋 <b>Top 30 for {month}</b> (by {used} Binance futures volume): "
+                        + ", ".join(x[:-4] + ("*" if src.get(x) == "bitget" else "") for x in top)
+                        + ("\n* = futures-only coin, paper prices from Bitget futures" if "bitget" in src.values() else "")
+                        + (f"\n⚠️ No price data on GitHub for: {', '.join(x[:-4] for x in nod)} (skipped)" if nod else ""))
             return True
         cands = []
         for s in self.ex.market_symbols():
@@ -384,7 +390,8 @@ class Trader:
             try:
                 C = [x for x in ex.klines(sym, "4h", 1000) if x["ct"] < now]
             except Exception as e:
-                msgs.append(f"⚠️ {sym}: candles failed ({e})")
+                if sym not in getattr(ex, "d", {}).get("nodata", []):
+                    msgs.append(f"⚠️ {sym}: candles failed ({e})")
                 continue
             if len(C) >= 260:
                 data[sym] = C
@@ -553,6 +560,8 @@ class PaperEx:
     Fills: market orders at the current spot price -/+ PAPER_SLIP_PCT; 0.05% fee per side; protective stops fill when
     a 1h candle's wick touches them (a gap fills at the candle open). Funding is not simulated."""
     SPOT = "https://data-api.binance.vision/api/v3"
+    BITGET = "https://api.bitget.com/api/v2/mix/market"
+    RULE = "futures-top30-v2"                          # Top 30 = pure futures volume ranking (no spot filter)
     VISION = "https://data.binance.vision"
     FEE = 0.0005
 
@@ -607,19 +616,42 @@ class PaperEx:
             return sym[i:], float(sym[:i])
         return sym, 1.0
 
+    def source(self, sym):
+        """Binance spot candles when the coin has a spot pair (1000x contracts scaled), else Bitget USDT futures."""
+        spot, k = self.spot_of(sym)
+        if spot in self.spot_syms():
+            return "spot", spot, k
+        return "bitget", sym, 1.0
+
     def klines(self, sym, interval, limit=1000, start=None, end=None):
         key = (sym, interval, limit, start, end)
         if key in self._cache:
             return self._cache[key]
-        spot, k = self.spot_of(sym)
-        p = {"symbol": spot, "interval": interval, "limit": limit}
-        if start is not None:
-            p["startTime"] = start
-        if end is not None:
-            p["endTime"] = end
-        rows = self._get(f"{self.SPOT}/klines", p)
-        out = [{"t": int(r[0]), "o": float(r[1]) * k, "h": float(r[2]) * k, "l": float(r[3]) * k,
-                "c": float(r[4]) * k, "ct": int(r[6]), "qv": float(r[7])} for r in rows]
+        src, name, k = self.source(sym)
+        ms = {"1h": 3600000, "4h": H4, "1d": DAY}[interval]
+        if src == "spot":
+            p = {"symbol": name, "interval": interval, "limit": limit}
+            if start is not None:
+                p["startTime"] = start
+            if end is not None:
+                p["endTime"] = end
+            rows = self._get(f"{self.SPOT}/klines", p)
+            out = [{"t": int(r[0]), "o": float(r[1]) * k, "h": float(r[2]) * k, "l": float(r[3]) * k,
+                    "c": float(r[4]) * k, "ct": int(r[6]), "qv": float(r[7])} for r in rows]
+        else:
+            p = {"symbol": name, "productType": "USDT-FUTURES", "granularity": interval.upper(),
+                 "limit": min(limit, 1000)}
+            if start is not None:
+                p["startTime"] = start
+                p["endTime"] = int(end if end is not None else self.now())
+            data = self._get(f"{self.BITGET}/candles", p)
+            if not isinstance(data, dict) or str(data.get("code")) != "00000" or not data.get("data"):
+                raise BinanceError(-1, f"Bitget candles {name}: {str(data)[:120]}")
+            rows = sorted(data["data"], key=lambda r: int(r[0]))
+            out = [{"t": int(r[0]), "o": float(r[1]), "h": float(r[2]), "l": float(r[3]), "c": float(r[4]),
+                    "ct": int(r[0]) + ms - 1, "qv": float(r[6]) if len(r) > 6 else 0.0} for r in rows]
+            if start is None:
+                out = out[-limit:]
         if interval == "4h" and limit >= 1000:
             self.d["onboard"][sym] = out[0]["t"] if len(out) < limit else 0
         self._cache[key] = out
@@ -646,9 +678,7 @@ class PaperEx:
             if "<IsTruncated>true</IsTruncated>" not in r.text or not pre:
                 break
             marker = f"data/futures/um/monthly/klines/{pre[-1]}/"
-        spot = self.spot_syms()
-        syms = [x for x in sorted(set(syms)) if x.endswith("USDT") and "_" not in x and x not in EXCLUDE
-                and self.spot_of(x)[0] in spot]
+        syms = [x for x in sorted(set(syms)) if x.endswith("USDT") and "_" not in x and x not in EXCLUDE]
         for back in (0, 1):
             m = prev_first
             for _ in range(back):
@@ -671,6 +701,13 @@ class PaperEx:
             if len(got) >= TOP_N:
                 top = [s for _, s in sorted(got, reverse=True)[:TOP_N]]
                 self.d["known"] = sorted(set(self.d["known"]) | set(top))
+                self.d["nodata"] = []
+                for s in top:                               # every Top 30 coin needs candles from somewhere
+                    try:
+                        self.klines(s, "4h", 5)
+                    except Exception:
+                        self.d["nodata"].append(s)
+                self.d["sources"] = {s: self.source(s)[0] for s in top}
                 return top, m.strftime("%b %Y")
         raise RuntimeError("monthly volume files not available")
 
@@ -696,8 +733,11 @@ class PaperEx:
         pass
 
     def price(self, sym):
-        spot, k = self.spot_of(sym)
-        return float(self._get(f"{self.SPOT}/ticker/price", {"symbol": spot})["price"]) * k
+        src, name, k = self.source(sym)
+        if src == "spot":
+            return float(self._get(f"{self.SPOT}/ticker/price", {"symbol": name})["price"]) * k
+        d = self._get(f"{self.BITGET}/ticker", {"symbol": name, "productType": "USDT-FUTURES"})
+        return float(d["data"][0]["lastPr"])
 
     def account(self):
         unreal, used = 0.0, 0.0
