@@ -1,5 +1,5 @@
 {
- "last_ct": 1792180799999,
+ "last_ct": 1792195199999,
  "pos": {
   "LINKUSDT": {
    "side": -1,
@@ -46,8 +46,8 @@
   "TAOUSDT"
  ],
  "universe_month": "2026-10",
- "day": "2026-10-16",
- "day_equity": 300.0,
+ "day": "2026-10-17",
+ "day_equity": 300.30089353867925,
  "paused_day": null,
  "started": "15 Oct 2026 12:01 IST",
  "eq0": 300.0,
