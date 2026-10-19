@@ -71,9 +71,21 @@
    "sym": "HYPEUSDT",
    "tp": 77.16,
    "why": "expired"
+  },
+  {
+   "at": 1792411336,
+   "cancel_ct": 1792411199999,
+   "entry": 2.9115,
+   "side": "SHORT",
+   "signal_ct": 1792407599999,
+   "sl": 2.9412805149510817,
+   "sweep_t": 1792393200000,
+   "sym": "ICPUSDT",
+   "tp": 2.763,
+   "why": "ran away"
   }
  ],
- "cancelled": 9,
+ "cancelled": 10,
  "closed": [
   {
    "closed": 1792033340,
@@ -101,35 +113,7 @@
  ],
  "last_error_alert": 0,
  "last_heartbeat": "2026-10-19",
- "open": {
-  "ICPUSDT|SHORT|smc|1h|1792393200000": {
-   "cancel": 2.8519389700978373,
-   "entry": 2.9115,
-   "expires_ct": 1792421999999,
-   "fee_r": 0.09776526714808435,
-   "fut": {
-    "entry": 2.908610651670526,
-    "ratio": 0.9990076083360899,
-    "sl": 2.9412999742995094,
-    "tp": 2.7602580218326165
-   },
-   "kind": "smc",
-   "last_ct": 1792407599999,
-   "opened": 1792407599999,
-   "risk": 0.02978051495108147,
-   "side": "SHORT",
-   "sl": 2.9412805149510817,
-   "sl0": 2.9412805149510817,
-   "slp": 1.0228581470404077,
-   "source": "spot-vision",
-   "status": "pending",
-   "sweep_t": 1792393200000,
-   "sym": "ICPUSDT",
-   "tf": "1h",
-   "tp": 2.763,
-   "usd_r": 0.9717152396883872
-  }
- },
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "HYPEUSDT|SHORT|smc|1h|1792324800000": 1792335686,
