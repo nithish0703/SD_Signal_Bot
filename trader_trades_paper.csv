@@ -1,0 +1,2 @@
+symbol,side,entry_time,exit_time,entry,exit,qty,pnl_usd_before_fees,why
+1000PEPEUSDT,SHORT,2026-10-18 16:04,2026-10-20 00:04,0.00381809,0.004162079999999999,3100.779078,-1.0666,4h close beyond the trailing stop
