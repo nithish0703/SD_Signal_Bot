@@ -177,6 +177,9 @@ class Binance:
     def market_symbols(self):
         return self._req("GET", "/fapi/v1/exchangeInfo", base=MARKET_BASE)["symbols"]
 
+    def price(self, sym):
+        return float(self._req("GET", "/fapi/v1/ticker/price", {"symbol": sym}, base=MARKET_BASE)["price"])
+
     # trading account
     def exchange_info(self):
         return self._req("GET", "/fapi/v1/exchangeInfo")["symbols"]
@@ -300,7 +303,7 @@ class Trader:
             self.st["universe"], self.st["universe_month"], self.st["universe_rule"] = top, month, rule
             src = self.ex.d.get("sources", {})
             nod = self.ex.d.get("nodata", [])
-            self.notify(f"📋 <b>Top 30 for {month}</b> (by {used} Binance futures volume): "
+            self.notify(f"📋 <b>Top 30 for {month}</b> (crypto only, by {used} Binance futures volume): "
                         + ", ".join(x[:-4] + ("*" if src.get(x) == "bitget" else "") for x in top)
                         + ("\n* = futures-only coin, paper prices from Bitget futures" if "bitget" in src.values() else "")
                         + (f"\n⚠️ Not enough price data on GitHub for: {', '.join(x[:-4] for x in nod)} "
@@ -357,12 +360,6 @@ class Trader:
         equity = self.equity(acct)
         day = datetime.fromtimestamp(now / 1000, timezone.utc).strftime("%Y-%m-%d")
         if st.get("day") != day:
-            if st.get("day") is not None:
-                start_eq = cfg.acct_size or st.get("eq_first") or equity
-                op = ", ".join(f"{k[:-4]} {'L' if v['side'] > 0 else 'S'}" for k, v in sorted(st["pos"].items()))
-                msgs.append(f"📋 <b>Daily summary</b> ({st['day']}): equity <b>${equity:,.2f}</b> "
-                            f"({equity - start_eq:+.2f}$ since start), day {equity - st['day_equity']:+.2f}$\n"
-                            f"Open {len(st['pos'])}/{cfg.max_open}: {op or 'none'}")
             st.setdefault("eq_first", equity)
             st["day"], st["day_equity"] = day, equity
         if st.get("started") is None:
@@ -530,6 +527,87 @@ class Trader:
         st["last_ct"] = latest
         return self.finish(msgs)
 
+    # ------------------------------------------------------------------ daily report (10:00 IST)
+    REPORT_HOUR = 10
+
+    def _closed_trades(self):
+        rows = []
+        try:
+            import csv
+            with open(self.cfg.log_file, encoding="utf-8") as f:
+                for r in csv.DictReader(f):
+                    rows.append(r)
+        except FileNotFoundError:
+            pass
+        return rows
+
+    def report(self, now_ms=None):
+        """Daily report: balance, open trades with live P&L, trades closed in the last 24 h, totals."""
+        now_ms = now_ms or self.now()
+        st, ex, cfg = self.st, self.ex, self.cfg
+        acct = ex.account()
+        wallet = acct["wallet"]
+        start = cfg.acct_size or st.get("eq_first") or wallet
+        lines, unreal_total, risk_total = [], 0.0, 0.0
+        for sym, p in sorted(st["pos"].items()):
+            try:
+                px = ex.price(sym)
+            except Exception:
+                px = p["entry"]
+            pnl = p["side"] * p["qty"] * (px - p["entry"])
+            r = pnl / (p["qty"] * p["risk"]) if p["risk"] else 0.0
+            unreal_total += pnl
+            risk_total += p["side"] * p["qty"] * (p["em"] - p["entry"])        # P&L if its stop is hit
+            days = (now_ms - p["t_in"]) / DAY
+            gone = "" if acct["positions"].get(sym) else " (closed by stop, logged next run)"
+            lines.append(f"{'🟢' if pnl >= 0 else '🔴'} <b>{sym[:-4]} {'LONG' if p['side'] > 0 else 'SHORT'}</b> "
+                         f"{pnl:+.2f}$ ({r:+.1f}R){gone}\n"
+                         f"   entry {p['entry']:.6g} → now {px:.6g} · {days:.1f}d · trail {p['note']:.6g} · "
+                         f"stop {p['em']:.6g}")
+        equity = wallet + unreal_total
+        if cfg.acct_size > 0 and st.get("eq0") is not None and cfg.mode != "paper":
+            equity = cfg.acct_size + (acct["wallet"] + acct["unreal"] - st["eq0"])
+            wallet = equity - unreal_total
+        rows = self._closed_trades()
+        day_ago = datetime.fromtimestamp((now_ms - DAY) / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M")
+        recent = [x for x in rows if x["exit_time"] >= day_ago]
+        pnls = [float(x["pnl_usd_before_fees"]) for x in rows]
+        wins = sum(1 for v in pnls if v > 0)
+        fees = getattr(ex, "fees_paid", lambda: None)()
+        hist = st.setdefault("daily", [])
+        prev = hist[-1] if hist else None
+        today = datetime.fromtimestamp(now_ms / 1000, IST).strftime("%Y-%m-%d")
+        out = [f"📊 <b>Daily report — {datetime.fromtimestamp(now_ms / 1000, IST):%d %b %Y, %H:%M} IST</b>",
+               f"💰 Balance (closed trades): <b>${wallet:,.2f}</b>",
+               f"📈 Equity (with open trades): <b>${equity:,.2f}</b>"
+               + (f" · since yesterday {equity - prev['equity']:+.2f}$" if prev else ""),
+               f"🏁 Since start (${start:,.0f}): {equity - start:+.2f}$ ({(equity / start - 1) * 100:+.2f}%)",
+               "",
+               f"<b>Open trades: {len(st['pos'])}/{cfg.max_open}</b> · open P&L {unreal_total:+.2f}$ · "
+               f"if every emergency stop hits: {risk_total:+.2f}$"]
+        out += lines or ["   none"]
+        out += ["", f"<b>Closed in the last 24 h: {len(recent)}</b>"]
+        for x in recent:
+            v = float(x["pnl_usd_before_fees"])
+            out.append(f"{'✅' if v > 0 else '❌'} {x['symbol'][:-4]} {x['side']} {v:+.2f}$ — {x['why']}")
+        out += ["", f"<b>All closed trades:</b> {len(rows)} · wins {wins} · losses {len(rows) - wins}"
+                + (f" · win {wins / len(rows) * 100:.0f}%" if rows else "")
+                + f" · P&L {sum(pnls):+.2f}$ before fees" + (f" · fees paid ${fees:.2f}" if fees is not None else "")]
+        if len(hist) >= 2:
+            out.append("Last days (equity): " + " · ".join(f"{h['date'][5:]} ${h['equity']:,.2f}" for h in hist[-6:]))
+        hist.append({"date": today, "wallet": round(wallet, 4), "equity": round(equity, 4)})
+        st["daily"] = hist[-400:]
+        st["report_day"] = today
+        self.save()
+        chunk = ""                                          # Telegram max 4096 chars: split between lines
+        for line in out:
+            if chunk and len(chunk) + len(line) + 1 > 3800:
+                self.notify(chunk)
+                chunk = "📊 <b>Daily report (continued)</b>"
+            chunk = f"{chunk}\n{line}" if chunk else line
+        self.notify(chunk)
+        return out
+
     def finish(self, msgs):
         self.save()
         for m in msgs:
@@ -562,7 +640,7 @@ class PaperEx:
     a 1h candle's wick touches them (a gap fills at the candle open). Funding is not simulated."""
     SPOT = "https://data-api.binance.vision/api/v3"
     BITGET = "https://api.bitget.com/api/v2/mix/market"
-    RULE = "futures-top30-v2"                          # Top 30 = pure futures volume ranking (no spot filter)
+    RULE = "crypto-top30-v3"                           # Top 30 by futures volume, crypto only (= has a Binance spot pair)
     VISION = "https://data.binance.vision"
     FEE = 0.0005
 
@@ -576,6 +654,8 @@ class PaperEx:
         except FileNotFoundError:
             self.d = {"wallet": cfg.acct_size or 300.0, "pos": {}, "stops": {}, "next_id": 1, "known": [],
                       "onboard": {}, "fills": []}
+        if "fees" not in self.d:                           # running total (the fill list is trimmed)
+            self.d["fees"] = sum(abs(q) * px * self.FEE for _, _, q, px, _ in self.d["fills"])
         self.s = requests.Session()
         self._spot_syms = None
         self._cache = {}
@@ -690,7 +770,12 @@ class PaperEx:
             if "<IsTruncated>true</IsTruncated>" not in r.text or not pre:
                 break
             marker = f"data/futures/um/monthly/klines/{pre[-1]}/"
-        syms = [x for x in sorted(set(syms)) if x.endswith("USDT") and "_" not in x and x not in EXCLUDE]
+        spot = self.spot_syms()
+        if spot is None:                                    # cannot tell crypto from stock/oil contracts: keep old list
+            raise RuntimeError("Binance spot list unavailable - crypto filter not possible")
+        # crypto only: stock / commodity contracts (SNDK, MU, CL, BZ ...) have no Binance spot pair
+        syms = [x for x in sorted(set(syms)) if x.endswith("USDT") and "_" not in x and x not in EXCLUDE
+                and self.spot_of(x)[0] in spot]
         for back in (0, 1):
             m = prev_first
             for _ in range(back):
@@ -773,6 +858,7 @@ class PaperEx:
     def _fill(self, sym, signed_qty, px, kind):
         fee = abs(signed_qty) * px * self.FEE
         self.d["wallet"] -= fee
+        self.d["fees"] = self.d.get("fees", 0.0) + fee
         p = self.d["pos"].get(sym)
         if p:
             self.d["wallet"] += -signed_qty * (px - p["entry"]) if abs(signed_qty) <= abs(p["qty"]) + 1e-12 else 0
@@ -808,6 +894,9 @@ class PaperEx:
     def cancel_stops(self, sym):
         for k in [k for k, v in self.d["stops"].items() if v[0] == sym]:
             self.d["stops"].pop(k)
+
+    def fees_paid(self):
+        return self.d["fees"]
 
     def stop_fill(self, sym):
         return self._fills.pop(sym, None)
@@ -919,6 +1008,31 @@ def selftest(cfg, ex):
     print("SELFTEST PASSED" if not left else f"SELFTEST: position still open ({left}) - close it by hand")
 
 
+def send_report_when_due(tr, ex, until_next_close):
+    """The daily report goes out at 10:00 IST. Called after each run: if 10:00 IST falls before the next 4h close,
+    wait for it (the 09:30 IST close run waits ~26 min), then send. A report missed at 10:00 goes out at the next run."""
+    now = time.time() * 1000
+    d = datetime.fromtimestamp(now / 1000, IST)
+    target = d.replace(hour=Trader.REPORT_HOUR, minute=0, second=0, microsecond=0)
+    nxt_close = (now // H4 + 1) * H4
+    if tr.st.get("report_day") == d.strftime("%Y-%m-%d"):
+        return
+    wait = (target.timestamp() * 1000 - now) / 1000
+    if wait > 0 and until_next_close and target.timestamp() * 1000 < nxt_close:
+        time.sleep(wait)
+    elif wait > 0:
+        return
+    try:
+        if hasattr(ex, "_cache"):
+            ex._cache = {}
+        tr.report()
+        if hasattr(ex, "save"):
+            ex.save()
+    except Exception as e:
+        tr.notify(f"🚨 Daily report failed: {type(e).__name__}: {e}")
+        traceback.print_exc()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
@@ -951,6 +1065,7 @@ def main():
                 tr.notify(f"🚨 Paper trader error: {type(e).__name__}: {e}")
                 traceback.print_exc()
             ex.save()
+            send_report_when_due(tr, ex, until_next_close=True)
             if not a.loop:
                 return
             now = time.time() * 1000
@@ -975,6 +1090,7 @@ def main():
         except Exception as e:
             tr.notify(f"🚨 Trader error: {type(e).__name__}: {e}")
             traceback.print_exc()
+        send_report_when_due(tr, ex, until_next_close=a.loop)
         if not a.loop:
             return
         now = time.time() * 1000
