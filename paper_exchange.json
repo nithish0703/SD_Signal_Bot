@@ -1,5 +1,5 @@
 {
- "wallet": 298.8865059066877,
+ "wallet": 298.8800544447898,
  "pos": {
   "LINKUSDT": {
    "qty": -1.129522,
@@ -24,6 +24,10 @@
   "1000PEPEUSDT": {
    "qty": 2951.807629,
    "entry": 0.004162079999999999
+  },
+  "SUIUSDT": {
+   "qty": -12.988609,
+   "entry": 0.9934030500000001
   }
  },
  "stops": {
@@ -32,45 +36,52 @@
    "BUY",
    12.68762668,
    1792353848118,
-   1792483200000
+   1792497600000
   ],
   "19": [
    "ADAUSDT",
    "BUY",
    0.23453635,
    1792353848118,
-   1792483200000
+   1792497600000
   ],
   "20": [
    "PUMPUSDT",
    "BUY",
    0.00473505,
    1792353848118,
-   1792483200000
+   1792497600000
   ],
   "21": [
    "ENAUSDT",
    "BUY",
    0.2075388,
    1792353848118,
-   1792483200000
+   1792497600000
   ],
   "22": [
    "TAOUSDT",
    "BUY",
    287.76206674,
    1792353848118,
-   1792483200000
+   1792497600000
   ],
   "24": [
    "1000PEPEUSDT",
    "SELL",
    0.00372031,
    1792483447792,
-   1792483447792
+   1792497600000
+  ],
+  "25": [
+   "SUIUSDT",
+   "BUY",
+   1.10888885,
+   1792497853391,
+   1792497853391
   ]
  },
- "next_id": 25,
+ "next_id": 26,
  "known": [
   "1000PEPEUSDT",
   "AAVEUSDT",
@@ -213,41 +224,50 @@
    2951.807629,
    0.004162079999999999,
    1792454646516
+  ],
+  [
+   "SUIUSDT",
+   "open",
+   -12.988609,
+   0.9934030500000001,
+   1792497853391
   ]
  ],
  "nodata": [
-  "HYPEUSDT"
+  "HYPEUSDT",
+  "\u725b\u6765USDT"
  ],
  "sources": {
   "ZECUSDT": "spot",
   "SOLUSDT": "spot",
-  "SNDKUSDT": "bitget",
   "XRPUSDT": "spot",
-  "CLUSDT": "bitget",
-  "SOXLUSDT": "bitget",
-  "SPCXUSDT": "bitget",
-  "SKHYNIXUSDT": "bitget",
   "HYPEUSDT": "spot",
   "NEARUSDT": "spot",
   "DOGEUSDT": "spot",
-  "BZUSDT": "bitget",
   "UNIUSDT": "spot",
   "BNBUSDT": "spot",
   "SUIUSDT": "spot",
-  "MUUSDT": "bitget",
-  "KORUUSDT": "bitget",
   "LSKUSDT": "spot",
   "ENAUSDT": "spot",
-  "SKHYUSDT": "bitget",
   "1000PEPEUSDT": "spot",
   "QNTUSDT": "spot",
-  "SNXXUSDT": "bitget",
-  "AKEUSDT": "bitget",
   "ARBUSDT": "spot",
   "WLDUSDT": "spot",
   "PUMPUSDT": "spot",
   "LINKUSDT": "spot",
   "ADAUSDT": "spot",
-  "TAOUSDT": "spot"
- }
+  "TAOUSDT": "spot",
+  "AVAXUSDT": "spot",
+  "MARSCOINUSDT": "spot",
+  "BCHUSDT": "spot",
+  "ONDOUSDT": "spot",
+  "FILUSDT": "spot",
+  "TRUMPUSDT": "spot",
+  "\u725b\u6765USDT": "spot",
+  "LTCUSDT": "spot",
+  "DASHUSDT": "spot",
+  "ONEUSDT": "spot",
+  "AAVEUSDT": "spot"
+ },
+ "fees": 0.053308560169087166
 }

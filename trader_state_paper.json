@@ -1,5 +1,5 @@
 {
- "last_ct": 1792483199999,
+ "last_ct": 1792497599999,
  "pos": {
   "LINKUSDT": {
    "side": -1,
@@ -66,39 +66,50 @@
    "em": 0.00372031,
    "algo_id": 24,
    "t_in": 1792454641964
+  },
+  "SUIUSDT": {
+   "side": -1,
+   "qty": 12.988609,
+   "entry": 0.9934030500000001,
+   "risk": 0.0769905328237739,
+   "best": 0.9934030500000001,
+   "note": 1.070393582823774,
+   "em": 1.10888885,
+   "algo_id": 25,
+   "t_in": 1792497841962
   }
  },
  "universe": [
   "ZECUSDT",
   "SOLUSDT",
-  "SNDKUSDT",
   "XRPUSDT",
-  "CLUSDT",
-  "SOXLUSDT",
-  "SPCXUSDT",
-  "SKHYNIXUSDT",
   "HYPEUSDT",
   "NEARUSDT",
   "DOGEUSDT",
-  "BZUSDT",
   "UNIUSDT",
   "BNBUSDT",
   "SUIUSDT",
-  "MUUSDT",
-  "KORUUSDT",
   "LSKUSDT",
   "ENAUSDT",
-  "SKHYUSDT",
   "1000PEPEUSDT",
   "QNTUSDT",
-  "SNXXUSDT",
-  "AKEUSDT",
   "ARBUSDT",
   "WLDUSDT",
   "PUMPUSDT",
   "LINKUSDT",
   "ADAUSDT",
-  "TAOUSDT"
+  "TAOUSDT",
+  "AVAXUSDT",
+  "MARSCOINUSDT",
+  "BCHUSDT",
+  "ONDOUSDT",
+  "FILUSDT",
+  "TRUMPUSDT",
+  "\u725b\u6765USDT",
+  "LTCUSDT",
+  "DASHUSDT",
+  "ONEUSDT",
+  "AAVEUSDT"
  ],
  "universe_month": "2026-10",
  "day": "2026-10-20",
@@ -107,5 +118,13 @@
  "started": "15 Oct 2026 12:01 IST",
  "eq0": 300.0,
  "eq_first": 300.0,
- "universe_rule": "futures-top30-v2"
+ "universe_rule": "crypto-top30-v3",
+ "daily": [
+  {
+   "date": "2026-10-20",
+   "wallet": 298.8801,
+   "equity": 300.1934
+  }
+ ],
+ "report_day": "2026-10-20"
 }
