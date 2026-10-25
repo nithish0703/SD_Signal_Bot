@@ -1,5 +1,5 @@
 {
- "last_ct": 1792871999999,
+ "last_ct": 1792886399999,
  "pos": {
   "AVAXUSDT": {
    "side": -1,
@@ -90,8 +90,8 @@
   "AAVEUSDT"
  ],
  "universe_month": "2026-10",
- "day": "2026-10-24",
- "day_equity": 298.7504884459952,
+ "day": "2026-10-25",
+ "day_equity": 299.2955357617447,
  "paused_day": null,
  "started": "15 Oct 2026 12:01 IST",
  "eq0": 300.0,
