@@ -143,9 +143,21 @@
    "sym": "ZROUSDT",
    "tp": 1.779,
    "why": "ran away"
+  },
+  {
+   "at": 1793286135,
+   "cancel_ct": 1793285999999,
+   "entry": 0.4149,
+   "side": "LONG",
+   "signal_ct": 1793271599999,
+   "sl": 0.4081666151142353,
+   "sweep_t": 1793257200000,
+   "sym": "WLDUSDT",
+   "tp": 0.4538,
+   "why": "ran away"
   }
  ],
- "cancelled": 15,
+ "cancelled": 16,
  "closed": [
   {
    "closed": 1792033340,
@@ -196,35 +208,7 @@
  ],
  "last_error_alert": 0,
  "last_heartbeat": "2026-10-29",
- "open": {
-  "WLDUSDT|LONG|smc|1h|1793257200000": {
-   "cancel": 0.4283667697715294,
-   "entry": 0.4149,
-   "expires_ct": 1793285999999,
-   "fee_r": 0.06161834011258677,
-   "fut": {
-    "entry": 0.4146171136363636,
-    "ratio": 0.9993181818181818,
-    "sl": 0.40748043137514434,
-    "tp": 0.4534905909090909
-   },
-   "kind": "smc",
-   "last_ct": 1793282399999,
-   "opened": 1793271599999,
-   "risk": 0.006733384885764693,
-   "side": "LONG",
-   "sl": 0.4081666151142353,
-   "sl0": 0.4081666151142353,
-   "slp": 1.6228934407724012,
-   "source": "spot-vision",
-   "status": "pending",
-   "sweep_t": 1793257200000,
-   "sym": "WLDUSDT",
-   "tf": "1h",
-   "tp": 0.4538,
-   "usd_r": 0.9737360644634407
-  }
- },
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "AAVEUSDT|SHORT|smc|1h|1793174400000": 1793192494,
