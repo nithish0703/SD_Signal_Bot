@@ -119,9 +119,21 @@
    "sym": "UNIUSDT",
    "tp": 6.903,
    "why": "expired"
+  },
+  {
+   "at": 1793235769,
+   "cancel_ct": 1793235599999,
+   "entry": 0.90015,
+   "side": "LONG",
+   "signal_ct": 1793217599999,
+   "sl": 0.8770258038502317,
+   "sweep_t": 1793196000000,
+   "sym": "FILUSDT",
+   "tp": 0.9328,
+   "why": "expired"
   }
  ],
- "cancelled": 13,
+ "cancelled": 14,
  "closed": [
   {
    "closed": 1792033340,
@@ -172,35 +184,7 @@
  ],
  "last_error_alert": 0,
  "last_heartbeat": "2026-10-28",
- "open": {
-  "FILUSDT|LONG|smc|1h|1793196000000": {
-   "cancel": 0.9463983922995367,
-   "entry": 0.90015,
-   "expires_ct": 1793231999999,
-   "fee_r": 0.03892675854200525,
-   "fut": {
-    "entry": 0.8994613606557377,
-    "ratio": 0.9992349726775956,
-    "sl": 0.8754785002926848,
-    "tp": 0.9320863825136612
-   },
-   "kind": "smc",
-   "last_ct": 1793231999999,
-   "opened": 1793217599999,
-   "risk": 0.02312419614976835,
-   "side": "LONG",
-   "sl": 0.8770258038502317,
-   "sl0": 0.8770258038502317,
-   "slp": 2.568926973256496,
-   "source": "spot-vision",
-   "status": "pending",
-   "sweep_t": 1793196000000,
-   "sym": "FILUSDT",
-   "tf": "1h",
-   "tp": 0.9328,
-   "usd_r": 0.8991244406397736
-  }
- },
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "AAVEUSDT|SHORT|smc|1h|1793174400000": 1793192494,
