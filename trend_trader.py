@@ -2,15 +2,15 @@
 --paper: a simulated account that runs on GitHub Actions (see PaperEx) - same trading logic, no API key.
 
 Same rules as the backtests (trend_robust.py "Realistic"):
-  Universe  Top 30 USDT perpetuals by last month's futures quote volume (no BTC/ETH, stablecoins, gold/stock/index
-            contracts), recomputed on the 1st of every month; coin needs >= 100 days of history.
+  Universe  Top 30 USDT perpetuals by last month's futures quote volume (no stablecoins, gold/stock/index contracts;
+            BTC/ETH only with INCLUDE_BTC_ETH=1), recomputed on the 1st of every month; >= 100 days of history.
   Entry     4h close: EMA50 crosses EMA200 up -> LONG, down -> SHORT (only coins in this month's Top 30).
   Exit      4h close beyond the chandelier trail (best close since entry -/+ 3 x ATR14), or the opposite cross
             (then the reverse trade opens, if the coin is in the Top 30). Market orders.
   Stop      An exchange STOP_MARKET (closePosition, mark price) at trail -/+ 1.5 ATR, moved when the trail improves
             by >= 0.5 ATR. Only a crash guard: normal exits are the 4h-close rules above.
   Size      qty = RISK_USD / (3 x ATR14), rounded down to Binance's step; if below the minimum order the minimum is
-            used only when its risk is <= 1.5 x RISK_USD, else skipped. Max 12 open, total size <= 3 x equity.
+            used only when its risk is <= 1.5 x RISK_USD, else skipped. Max MAX_OPEN (12) open, size <= 3 x equity.
             Isolated margin, LEVERAGE (default 5) - leverage only sets margin, the risk is set by the size.
 Safety      Demo unless TRADER_MODE=live AND LIVE_CONFIRM=I_UNDERSTAND. A file named STOP_TRADER in this folder stops
             new entries (open trades are still managed). Daily loss guard: no new entries for the rest of the UTC
@@ -52,6 +52,16 @@ EXCLUDE = {"BTCUSDT", "ETHUSDT", "USDCUSDT", "FDUSDUSDT", "TUSDUSDT", "BUSDUSDT"
            "QQQUSDT", "CRCLUSDT", "INTCUSDT", "AMDUSDT", "NFLXUSDT", "PLTRUSDT", "ORCLUSDT", "BABAUSDT",
            "BTCDOMUSDT", "DEFIUSDT", "FOOTBALLUSDT", "BLUEBIRDUSDT", "ALL1USDT"}
 TOP_N, MIN_HIST, TOL = 30, 100 * DAY, 1.5
+MAJORS = {"BTCUSDT", "ETHUSDT"}
+
+
+def btc_eth_on():
+    """INCLUDE_BTC_ETH=1 -> BTC and ETH may be in the Top 30 (read at run time, after trader.env is loaded)."""
+    return os.getenv("INCLUDE_BTC_ETH", "0").strip() == "1"
+
+
+def excluded(sym):
+    return sym in EXCLUDE and not (sym in MAJORS and btc_eth_on())
 
 
 # ----------------------------------------------------------------------------------------------- config
@@ -303,7 +313,8 @@ class Trader:
             self.st["universe"], self.st["universe_month"], self.st["universe_rule"] = top, month, rule
             src = self.ex.d.get("sources", {})
             nod = self.ex.d.get("nodata", [])
-            self.notify(f"📋 <b>Top 30 for {month}</b> (crypto only, by {used} Binance futures volume): "
+            self.notify(f"📋 <b>Top 30 for {month}</b> (crypto only{', BTC/ETH included' if btc_eth_on() else ''}, "
+                        f"by {used} Binance futures volume): "
                         + ", ".join(x[:-4] + ("*" if src.get(x) == "bitget" else "") for x in top)
                         + ("\n* = futures-only coin, paper prices from Bitget futures" if "bitget" in src.values() else "")
                         + (f"\n⚠️ Not enough price data on GitHub for: {', '.join(x[:-4] for x in nod)} "
@@ -313,7 +324,7 @@ class Trader:
         for s in self.ex.market_symbols():
             sym = s["symbol"]
             if (s.get("contractType") != "PERPETUAL" or s.get("quoteAsset") != "USDT" or s.get("status") != "TRADING"
-                    or sym in EXCLUDE or s.get("underlyingType", "COIN") != "COIN"):
+                    or excluded(sym) or s.get("underlyingType", "COIN") != "COIN"):
                 continue
             try:
                 rows = self.ex.klines(sym, "1d", 40, start, end)
@@ -356,6 +367,12 @@ class Trader:
         if missing and hasattr(ex, "add_known"):            # paper exchange: make sure it knows every coin
             ex.add_known(missing)
             self.load_filters()
+        sig = f"${cfg.risk:g} risk, max {cfg.max_open} open, BTC/ETH {'included' if btc_eth_on() else 'excluded'}"
+        if st.get("cfg_sig") != sig:                        # settings changed: say so once (open trades keep their size)
+            if st.get("cfg_sig") or st.get("last_ct") is not None:
+                msgs.append(f"⚙️ <b>Settings changed</b>: {st.get('cfg_sig') or '$1 risk, max 12 open, BTC/ETH excluded'}"
+                            f" → <b>{sig}</b>. Open trades keep their size; new trades use the new settings.")
+            st["cfg_sig"] = sig
         acct = ex.account()
         equity = self.equity(acct)
         day = datetime.fromtimestamp(now / 1000, timezone.utc).strftime("%Y-%m-%d")
@@ -641,11 +658,14 @@ class PaperEx:
     SPOT = "https://data-api.binance.vision/api/v3"
     BITGET = "https://api.bitget.com/api/v2/mix/market"
     RULE = "crypto-top30-v3"                           # Top 30 by futures volume, crypto only (= has a Binance spot pair)
+    LIMITS = {"BTCUSDT": ("0.001", "100"), "ETHUSDT": ("0.001", "20")}   # real Binance step / min order (USD-M)
     VISION = "https://data.binance.vision"
     FEE = 0.0005
 
     def __init__(self, cfg, now=lambda: time.time() * 1000):
         self.cfg, self.now = cfg, now
+        if btc_eth_on():                                   # new rule -> the Top 30 is recomputed at once
+            self.RULE = "crypto-top30-v4-btceth"
         self.slip = float(os.getenv("PAPER_SLIP_PCT", "0.05") or 0.05) / 100
         self.file = os.path.join(HERE, "paper_exchange.json")
         try:
@@ -774,7 +794,7 @@ class PaperEx:
         if spot is None:                                    # cannot tell crypto from stock/oil contracts: keep old list
             raise RuntimeError("Binance spot list unavailable - crypto filter not possible")
         # crypto only: stock / commodity contracts (SNDK, MU, CL, BZ ...) have no Binance spot pair
-        syms = [x for x in sorted(set(syms)) if x.endswith("USDT") and "_" not in x and x not in EXCLUDE
+        syms = [x for x in sorted(set(syms)) if x.endswith("USDT") and "_" not in x and not excluded(x)
                 and self.spot_of(x)[0] in spot]
         for back in (0, 1):
             m = prev_first
@@ -816,10 +836,11 @@ class PaperEx:
         names = set(self.d["known"]) | set(self.d["pos"])
         return [{"symbol": s, "contractType": "PERPETUAL", "quoteAsset": "USDT", "status": "TRADING",
                  "onboardDate": 0,
-                 "filters": [{"filterType": "LOT_SIZE", "stepSize": "0.000001", "minQty": "0.000001",
-                              "maxQty": "1e12"},
+                 "filters": [{"filterType": "LOT_SIZE", "stepSize": self.LIMITS.get(s, ("0.000001",))[0],
+                              "minQty": self.LIMITS.get(s, ("0.000001",))[0], "maxQty": "1e12"},
                              {"filterType": "PRICE_FILTER", "tickSize": "0.00000001"},
-                             {"filterType": "MIN_NOTIONAL", "notional": "5"}]} for s in names]
+                             {"filterType": "MIN_NOTIONAL", "notional": self.LIMITS.get(s, (0, "5"))[1]}]}
+                for s in names]
 
     def sync_time(self):
         self.offset = 0
