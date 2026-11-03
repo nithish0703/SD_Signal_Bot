@@ -38,8 +38,9 @@ import trend_small as S  # noqa: E402
 import trend_top50 as T  # noqa: E402
 
 YEARS, DAY, H4 = TA.YEARS, TA.DAY, TA.H4
-RISK = 1.0
-MIN_GAIN = 5.0
+RISK = float(os.getenv("TF_RISK", "") or 1.0)          # $ risk per trade
+DAYS = int(float(os.getenv("TF_DAYS", "") or 0))       # 0 = full 4 years; N = fresh $300 start N days ago
+MIN_GAIN = 5.0 * RISK                                   # 5R per half
 SLIP = D.SLIP
 ADX_MIN, GAP_ATR, COOL_BARS = 20.0, 0.5, 18
 CSV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trend_filter_trades.csv")
@@ -66,7 +67,7 @@ def t2f(H, emergency=None, filt=None, btc=None):
             if (s > 0 and x["l"] <= lvl) or (s < 0 and x["h"] >= lvl):
                 px = min(x["o"], lvl) if s > 0 else max(x["o"], lvl)
                 closed(dict(side=s, t_in=pos["t_in"], entry=pos["entry"], risk=pos["risk"], t_out=x["t"],
-                            exit=px, why="emergency stop", intrabar=True), t)
+                            exit=px, why="emergency stop", intrabar=True, t_cross=pos["t_cross"]), t)
                 pos = None
         up = e50[t] > e200[t] and e50[t - 1] <= e200[t - 1]
         dn = e50[t] < e200[t] and e50[t - 1] >= e200[t - 1]
@@ -80,7 +81,7 @@ def t2f(H, emergency=None, filt=None, btc=None):
                    "opposite cross" if (s > 0 and dn) or (s < 0 and up) else None)
             if why:
                 closed(dict(side=s, t_in=pos["t_in"], entry=pos["entry"], risk=pos["risk"], t_out=nxt["t"],
-                            exit=nxt["o"], why=why, intrabar=False), t)
+                            exit=nxt["o"], why=why, intrabar=False, t_cross=pos["t_cross"]), t)
                 pos = None
             else:
                 if (trail - pos["note"]) * s >= 0.5 * A[t]:
@@ -117,11 +118,11 @@ def t2f(H, emergency=None, filt=None, btc=None):
             continue
         armed = None
         entry, risk = nxt["o"], 3 * A[t]
-        pos = dict(side=s, t_in=nxt["t"], entry=entry, risk=risk, best=entry, note=entry - s * risk)
+        pos = dict(side=s, t_in=nxt["t"], entry=entry, risk=risk, best=entry, note=entry - s * risk, t_cross=H[tc]["t"])
         pos["em"] = pos["note"] - s * (emergency or 0) * A[t]
     if pos:
         out.append(dict(side=pos["side"], t_in=pos["t_in"], entry=pos["entry"], risk=pos["risk"], t_out=None,
-                        exit=None, why="open", intrabar=False))
+                        exit=None, why="open", intrabar=False, t_cross=pos["t_cross"]))
     return out
 
 
@@ -190,8 +191,18 @@ def main():
 
     def in_top30(sym, t):
         return sym in top30.get(datetime.fromtimestamp(t / 1000, timezone.utc).strftime("%Y-%m"), ())
-    yb = [start + i * 365.25 * DAY for i in range(YEARS + 1)]
-    yname = [f"{datetime.fromtimestamp(yb[i] / 1000, timezone.utc):%b %y}" for i in range(YEARS)]
+    if DAYS:                                            # fresh start: $300, nothing open before, 4 equal parts
+        ws = end_t - DAYS * DAY
+        yb = [ws + i * DAYS * DAY / 4 for i in range(5)]
+        sim_times = [t for t in times if t >= ws]
+        span, plabel = f"last {DAYS} days (fresh $300 start, nothing open before)", "Quarter from"
+    else:
+        ws = None
+        yb = [start + i * 365.25 * DAY for i in range(YEARS + 1)]
+        sim_times = times
+        span, plabel = f"{YEARS} years", "Year from"
+    yname = [f"{datetime.fromtimestamp(yb[i] / 1000, timezone.utc):%d %b %y}" for i in range(4)]
+    hname = "(parts 1-2 and 3-4)" if DAYS else "(yrs 1-2 and 3-4)"
     E = R.EMERGENCY
     variants = [  # name, filter
         ("Realistic (reference, no filter)", None),
@@ -208,7 +219,9 @@ def main():
     res = {}
     for name, filt in variants:
         trades = ref_trades if filt is None else build(data, in_top30, end_t, emergency=E, filt=filt, btc=btc)
-        r = R.simulate(trades, closes, fund, times, RISK, limits, SLIP)
+        if ws is not None:
+            trades = [x for x in trades if x["t_in"] >= ws and x["t_cross"] >= ws - H4]   # signal after the start
+        r = R.simulate(trades, closes, fund, sim_times, RISK, limits, SLIP)
         y = R.yearly(r["curve"], yb)
         w, up, nm = R.worst_month(r["curve"])
         lg = r["log"]
@@ -234,19 +247,19 @@ def main():
             return "reference"
         ok = v["h1"] >= ref["h1"] + MIN_GAIN and v["h2"] >= ref["h2"] + MIN_GAIN and v["r"]["mdd"] <= ref["r"]["mdd"] + 0.01
         return "BETTER (both halves)" if ok else "not better"
-    out = [f"## T2 trend WHIPSAW FILTERS - Top 30 (no BTC/ETH), $300, ${RISK:g} risk, {YEARS} years\n",
+    out = [f"## T2 trend WHIPSAW FILTERS - Top 30 (no BTC/ETH), $300, ${RISK:g} risk, {span}\n",
            f"Reference = Realistic (emergency stop {E:g} ATR + {SLIP * 100:.2f}% slippage, fees, funding). "
            f"Self-check (no-filter path = trend_diag Realistic trades): {'OK' if same else 'MISMATCH - results not valid'}. "
            f"Rule fixed in advance: better = at least ${MIN_GAIN:g} more P&L in BOTH halves and max DD at most 1 point "
            f"worse. Size limits: {lim_src}.\n",
-           "| Variant | " + " | ".join(f"Year from {y}" for y in yname)
+           "| Variant | " + " | ".join(f"{plabel} {y}" for y in yname)
            + " | Half 1 | Half 2 | Final | Max DD | Worst month | Trades | Win % | PF | Whipsaw losses | Emergency stops"
              " | Big winners missed | Last 3 months | Verdict |",
-           "|---|" + "---|" * YEARS + "---|---|---|---|---|---|---|---|---|---|---|---|---|"]
-    tg = [f"🧹 <b>T2 trend — whipsaw filters</b> (Top 30, $300, ${RISK:g} risk, {YEARS} years, realistic costs)\n"
+           "|---|" + "---|" * 4 + "---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    tg = [f"🧹 <b>T2 trend — whipsaw filters</b> (Top 30, $300, ${RISK:g} risk, {span}, realistic costs)\n"
           f"Self-check: {'OK ✅' if same else 'MISMATCH ❌ (results not valid)'}\n"
           f"Rule fixed before running: a filter is better only if it earns ≥${MIN_GAIN:g} more in BOTH halves "
-          f"(yrs 1-2 and 3-4) and DD is ≤1 pt worse."]
+          f"{hname} and DD is ≤1 pt worse."]
     lines = []
     for name, _ in variants:
         v = res[name]
@@ -269,7 +282,7 @@ def main():
                                                           "losses are the normal cost of this strategy."))
     out.append("\nWhipsaw losses = trades closed by the opposite EMA cross at a loss. Big winners missed = reference trades of "
                ">= 5R where the filter opens no trade on that coin and side while the winner is running. "
-               "Last 3 months = change of the 4-year account in the last 91 days. Past results do not guarantee "
+               "Last 3 months = change of the account in the last 91 days. Past results do not guarantee "
                "future results.")
     with open(CSV_FILE, "w", newline="") as f:
         w = csv.writer(f)
