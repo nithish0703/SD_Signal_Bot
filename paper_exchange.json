@@ -1,5 +1,5 @@
 {
- "wallet": 294.2840008232536,
+ "wallet": 294.92399054581847,
  "pos": {
   "AVAXUSDT": {
    "qty": -1.438038,
@@ -12,10 +12,6 @@
   "ARBUSDT": {
    "qty": -53.297825,
    "entry": 0.16851570000000002
-  },
-  "FILUSDT": {
-   "qty": -10.894132,
-   "entry": 0.9419288000000001
   },
   "WLDUSDT": {
    "qty": -19.269655,
@@ -44,63 +40,56 @@
    "BUY",
    9.14620525,
    1793491464556,
-   1793707200000
+   1793721600000
   ],
   "96": [
    "SUIUSDT",
    "BUY",
    0.94682774,
    1793621045479,
-   1793707200000
-  ],
-  "101": [
-   "FILUSDT",
-   "BUY",
-   0.91114351,
-   1793664247571,
-   1793707200000
+   1793721600000
   ],
   "102": [
    "ARBUSDT",
    "BUY",
    0.17178721,
    1793678648024,
-   1793707200000
+   1793721600000
   ],
   "103": [
    "NEARUSDT",
    "BUY",
    4.42004427,
    1793678648024,
-   1793707200000
+   1793721600000
   ],
   "104": [
    "ZECUSDT",
    "BUY",
    1324.90952028,
    1793678648183,
-   1793707200000
+   1793721600000
   ],
   "105": [
    "WLDUSDT",
    "BUY",
    0.41681272,
    1793693048603,
-   1793707200000
+   1793721600000
   ],
   "106": [
    "BNBUSDT",
    "BUY",
    734.25835342,
    1793693048603,
-   1793707200000
+   1793721600000
   ],
   "107": [
    "BCHUSDT",
    "BUY",
    300.89543201,
    1793707447361,
-   1793707447361
+   1793721600000
   ]
  },
  "next_id": 108,
@@ -113,24 +102,30 @@
   "AVAXUSDT",
   "BCHUSDT",
   "BNBUSDT",
+  "BTCUSDT",
   "BZUSDT",
   "CLUSDT",
   "DASHUSDT",
   "DOGEUSDT",
   "ENAUSDT",
+  "ETHUSDT",
   "FILUSDT",
+  "GTCUSDT",
   "HYPEUSDT",
   "KORUUSDT",
   "LINKUSDT",
   "LSKUSDT",
   "LTCUSDT",
   "MARSCOINUSDT",
+  "MOVRUSDT",
   "MUUSDT",
   "NEARUSDT",
   "ONDOUSDT",
   "ONEUSDT",
   "PUMPUSDT",
   "QNTUSDT",
+  "RLCUSDT",
+  "SANDUSDT",
   "SKHYNIXUSDT",
   "SKHYUSDT",
   "SNDKUSDT",
@@ -138,8 +133,10 @@
   "SOLUSDT",
   "SOXLUSDT",
   "SPCXUSDT",
+  "STRKUSDT",
   "SUIUSDT",
   "TAOUSDT",
+  "TIAUSDT",
   "TRUMPUSDT",
   "UNIUSDT",
   "WLDUSDT",
@@ -188,7 +185,15 @@
   "KORUUSDT": 1784721600000,
   "SKHYUSDT": 1784721600000,
   "SNXXUSDT": 1784721600000,
-  "AKEUSDT": 1788350400000
+  "AKEUSDT": 1788350400000,
+  "BTCUSDT": 0,
+  "ETHUSDT": 0,
+  "STRKUSDT": 0,
+  "SANDUSDT": 0,
+  "RLCUSDT": 0,
+  "GTCUSDT": 0,
+  "TIAUSDT": 0,
+  "MOVRUSDT": 0
  },
  "fills": [
   [
@@ -435,42 +440,49 @@
    -0.060402,
    276.0619,
    1793707447361
+  ],
+  [
+   "FILUSDT",
+   "reduce",
+   10.894132,
+   0.88274115,
+   1793721855708
   ]
  ],
  "nodata": [
   "HYPEUSDT"
  ],
  "sources": {
+  "BTCUSDT": "spot",
+  "ETHUSDT": "spot",
   "ZECUSDT": "spot",
   "SOLUSDT": "spot",
+  "NEARUSDT": "spot",
   "XRPUSDT": "spot",
   "HYPEUSDT": "spot",
-  "NEARUSDT": "spot",
-  "DOGEUSDT": "spot",
-  "UNIUSDT": "spot",
   "BNBUSDT": "spot",
-  "SUIUSDT": "spot",
-  "LSKUSDT": "spot",
-  "ENAUSDT": "spot",
+  "DOGEUSDT": "spot",
   "1000PEPEUSDT": "spot",
-  "QNTUSDT": "spot",
-  "ARBUSDT": "spot",
   "WLDUSDT": "spot",
+  "ENAUSDT": "spot",
+  "SUIUSDT": "spot",
   "PUMPUSDT": "spot",
-  "LINKUSDT": "spot",
+  "UNIUSDT": "spot",
+  "STRKUSDT": "spot",
+  "QNTUSDT": "spot",
   "ADAUSDT": "spot",
-  "TAOUSDT": "spot",
+  "SANDUSDT": "spot",
   "AVAXUSDT": "spot",
-  "MARSCOINUSDT": "spot",
-  "BCHUSDT": "spot",
-  "ONDOUSDT": "spot",
   "FILUSDT": "spot",
-  "TRUMPUSDT": "spot",
-  "\u725b\u6765USDT": "spot",
-  "LTCUSDT": "spot",
-  "DASHUSDT": "spot",
-  "ONEUSDT": "spot",
-  "AAVEUSDT": "spot"
+  "RLCUSDT": "spot",
+  "LINKUSDT": "spot",
+  "TAOUSDT": "spot",
+  "AAVEUSDT": "spot",
+  "GTCUSDT": "spot",
+  "TIAUSDT": "spot",
+  "ONDOUSDT": "spot",
+  "MOVRUSDT": "spot",
+  "ARBUSDT": "spot"
  },
- "fees": 0.2285446697105027
+ "fees": 0.2333530190154686
 }

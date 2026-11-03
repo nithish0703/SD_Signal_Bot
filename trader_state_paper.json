@@ -1,5 +1,5 @@
 {
- "last_ct": 1793707199999,
+ "last_ct": 1793721599999,
  "pos": {
   "AVAXUSDT": {
    "side": -1,
@@ -32,17 +32,6 @@
    "note": 0.1654914760268255,
    "em": 0.17178721,
    "algo_id": 102,
-   "t_in": 1792829042154
-  },
-  "FILUSDT": {
-   "side": -1,
-   "qty": 10.894132,
-   "entry": 0.9419288000000001,
-   "risk": 0.09179253215632684,
-   "best": 0.8268,
-   "note": 0.8830290058643099,
-   "em": 0.91114351,
-   "algo_id": 101,
    "t_in": 1792829042154
   },
   "WLDUSDT": {
@@ -102,36 +91,36 @@
   }
  },
  "universe": [
+  "BTCUSDT",
+  "ETHUSDT",
   "ZECUSDT",
   "SOLUSDT",
+  "NEARUSDT",
   "XRPUSDT",
   "HYPEUSDT",
-  "NEARUSDT",
-  "DOGEUSDT",
-  "UNIUSDT",
   "BNBUSDT",
-  "SUIUSDT",
-  "LSKUSDT",
-  "ENAUSDT",
+  "DOGEUSDT",
   "1000PEPEUSDT",
-  "QNTUSDT",
-  "ARBUSDT",
   "WLDUSDT",
+  "ENAUSDT",
+  "SUIUSDT",
   "PUMPUSDT",
-  "LINKUSDT",
+  "UNIUSDT",
+  "STRKUSDT",
+  "QNTUSDT",
   "ADAUSDT",
-  "TAOUSDT",
+  "SANDUSDT",
   "AVAXUSDT",
-  "MARSCOINUSDT",
-  "BCHUSDT",
-  "ONDOUSDT",
   "FILUSDT",
-  "TRUMPUSDT",
-  "\u725b\u6765USDT",
-  "LTCUSDT",
-  "DASHUSDT",
-  "ONEUSDT",
-  "AAVEUSDT"
+  "RLCUSDT",
+  "LINKUSDT",
+  "TAOUSDT",
+  "AAVEUSDT",
+  "GTCUSDT",
+  "TIAUSDT",
+  "ONDOUSDT",
+  "MOVRUSDT",
+  "ARBUSDT"
  ],
  "universe_month": "2026-11",
  "day": "2026-11-03",
@@ -140,7 +129,7 @@
  "started": "15 Oct 2026 12:01 IST",
  "eq0": 300.0,
  "eq_first": 300.0,
- "universe_rule": "crypto-top30-v3",
+ "universe_rule": "crypto-top30-v4-btceth",
  "daily": [
   {
    "date": "2026-10-20",
@@ -218,5 +207,6 @@
    "equity": 301.0619
   }
  ],
- "report_day": "2026-11-03"
+ "report_day": "2026-11-03",
+ "cfg_sig": "$1.5 risk, max 15 open, BTC/ETH included"
 }
