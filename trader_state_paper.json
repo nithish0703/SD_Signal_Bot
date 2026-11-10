@@ -1,5 +1,5 @@
 {
- "last_ct": 1794254399999,
+ "last_ct": 1794268799999,
  "pos": {
   "WLDUSDT": {
    "side": -1,
@@ -68,8 +68,8 @@
   "ARBUSDT"
  ],
  "universe_month": "2026-11",
- "day": "2026-11-09",
- "day_equity": 295.9076668516102,
+ "day": "2026-11-10",
+ "day_equity": 295.76431674667907,
  "paused_day": null,
  "started": "15 Oct 2026 12:01 IST",
  "eq0": 300.0,
