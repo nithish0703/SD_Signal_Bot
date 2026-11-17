@@ -227,9 +227,21 @@
    "sym": "WLFIUSDT",
    "tp": 0.046,
    "why": "ran away"
+  },
+  {
+   "at": 1794952962,
+   "cancel_ct": 1794952799999,
+   "entry": 0.3064,
+   "side": "SHORT",
+   "signal_ct": 1794934799999,
+   "sl": 0.31231264317849755,
+   "sweep_t": 1794920400000,
+   "sym": "ONDOUSDT",
+   "tp": 0.2994,
+   "why": "expired"
   }
  ],
- "cancelled": 22,
+ "cancelled": 23,
  "closed": [
   {
    "closed": 1792033340,
@@ -372,35 +384,7 @@
  ],
  "last_error_alert": 0,
  "last_heartbeat": "2026-11-17",
- "open": {
-  "ONDOUSDT|SHORT|smc|1h|1794920400000": {
-   "cancel": 0.2945747136430049,
-   "entry": 0.3064,
-   "expires_ct": 1794949199999,
-   "fee_r": 0.05182115523464735,
-   "fut": {
-    "entry": 0.3061981554677207,
-    "ratio": 0.9993412384716733,
-    "sl": 0.3124190105279859,
-    "tp": 0.299202766798419
-   },
-   "kind": "smc",
-   "last_ct": 1794949199999,
-   "opened": 1794934799999,
-   "risk": 0.005912643178497545,
-   "side": "SHORT",
-   "sl": 0.31231264317849755,
-   "sl0": 0.31231264317849755,
-   "slp": 1.929713831102332,
-   "source": "spot-vision",
-   "status": "pending",
-   "sweep_t": 1794920400000,
-   "sym": "ONDOUSDT",
-   "tf": "1h",
-   "tp": 0.2994,
-   "usd_r": 0.964856915551166
-  }
- },
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "ONDOUSDT|SHORT|smc|1h|1794920400000": 1794934946,
