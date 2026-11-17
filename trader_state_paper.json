@@ -1,5 +1,5 @@
 {
- "last_ct": 1794873599999,
+ "last_ct": 1794887999999,
  "pos": {
   "WLDUSDT": {
    "side": -1,
@@ -248,8 +248,13 @@
    "date": "2026-11-16",
    "wallet": 292.429,
    "equity": 304.2385
+  },
+  {
+   "date": "2026-11-17",
+   "wallet": 292.429,
+   "equity": 303.6154
   }
  ],
- "report_day": "2026-11-16",
+ "report_day": "2026-11-17",
  "cfg_sig": "$1.5 risk, max 15 open, BTC/ETH included"
 }
