@@ -239,9 +239,21 @@
    "sym": "ONDOUSDT",
    "tp": 0.2994,
    "why": "expired"
+  },
+  {
+   "at": 1795125734,
+   "cancel_ct": 1795125599999,
+   "entry": 0.12905,
+   "side": "SHORT",
+   "signal_ct": 1795107599999,
+   "sl": 0.13148000935573212,
+   "sweep_t": 1795096800000,
+   "sym": "FETUSDT",
+   "tp": 0.1259,
+   "why": "expired"
   }
  ],
- "cancelled": 23,
+ "cancelled": 24,
  "closed": [
   {
    "closed": 1792033340,
@@ -384,35 +396,7 @@
  ],
  "last_error_alert": 0,
  "last_heartbeat": "2026-11-19",
- "open": {
-  "FETUSDT|SHORT|smc|1h|1795096800000": {
-   "cancel": 0.12418998128853576,
-   "entry": 0.12905,
-   "expires_ct": 1795121999999,
-   "fee_r": 0.053106791418553775,
-   "fut": {
-    "entry": 0.12895390915860017,
-    "ratio": 0.9992553983618765,
-    "sl": 0.1315134912345107,
-    "tp": 0.12580625465376027
-   },
-   "kind": "smc",
-   "last_ct": 1795121999999,
-   "opened": 1795107599999,
-   "risk": 0.002430009355732121,
-   "side": "SHORT",
-   "sl": 0.13148000935573212,
-   "sl0": 0.13148000935573212,
-   "slp": 1.882998338420861,
-   "source": "spot-vision",
-   "status": "pending",
-   "sweep_t": 1795096800000,
-   "sym": "FETUSDT",
-   "tf": "1h",
-   "tp": 0.1259,
-   "usd_r": 0.9414991692104305
-  }
- },
+ "open": {},
  "paper_since": "2026-10-01",
  "sent": {
   "FETUSDT|SHORT|smc|1h|1795096800000": 1795107746,
