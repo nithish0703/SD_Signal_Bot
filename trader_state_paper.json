@@ -1,5 +1,5 @@
 {
- "last_ct": 1795478399999,
+ "last_ct": 1795492799999,
  "pos": {
   "1000PEPEUSDT": {
    "side": -1,
@@ -228,8 +228,13 @@
    "date": "2026-11-23",
    "wallet": 298.5747,
    "equity": 307.0723
+  },
+  {
+   "date": "2026-11-24",
+   "wallet": 304.576,
+   "equity": 305.6442
   }
  ],
- "report_day": "2026-11-23",
+ "report_day": "2026-11-24",
  "cfg_sig": "$1.5 risk, max 15 open, BTC/ETH included"
 }
