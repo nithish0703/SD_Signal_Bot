@@ -1,5 +1,5 @@
 {
- "last_ct": 1795550399999,
+ "last_ct": 1795564799999,
  "pos": {
   "1000PEPEUSDT": {
    "side": -1,
@@ -46,8 +46,8 @@
   "ARBUSDT"
  ],
  "universe_month": "2026-11",
- "day": "2026-11-24",
- "day_equity": 305.8588750465987,
+ "day": "2026-11-25",
+ "day_equity": 305.7783704117587,
  "paused_day": null,
  "started": "15 Oct 2026 12:01 IST",
  "eq0": 300.0,
